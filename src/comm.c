@@ -6510,7 +6510,8 @@ query_ip_name (svalue_t *sp, Bool lookup)
         if (sp->type == T_NUMBER && !sp->u.number)
             return sp;
         svp = sp;
-        while (svp->type == T_LVALUE || svp->type == T_PROTECTED_LVALUE)
+        while ((svp->type == T_LVALUE &&  svp->x.lvalue_type == LVALUE_UNPROTECTED)
+             || svp->type == T_PROTECTED_LVALUE)
             svp = svp->u.lvalue;
         if (svp->type != T_OBJECT)
         {
@@ -6538,7 +6539,7 @@ query_ip_name (svalue_t *sp, Bool lookup)
     /* If the object was passed as reference, replace it with an array
      * with the full sockaddr_in.
      */
-    if (sp->type == T_LVALUE)
+    if (sp->type == T_LVALUE && sp->x.lvalue_type == LVALUE_UNPROTECTED)
     {
         svalue_t array, *svp;
         vector_t *v;

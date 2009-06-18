@@ -3909,8 +3909,7 @@ v_walk_mapping (svalue_t *sp, int num_arg)
         /* Push the values as lvalues */
         for (j = num_values, data = (read_pointer++)->u.lvalue; --j >= 0; )
         {
-             (++sp2)->type = T_LVALUE;
-             sp2->u.lvalue = data++;
+             assign_lvalue_no_free(++sp2, data++);
         }
 
         /* Call the function */

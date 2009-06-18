@@ -660,7 +660,8 @@ stack_put (svalue_t *pval, svalue_t *sp, size_t pos, int max)
  */
 
 {
-    if (pval && pos < (size_t)max && sp[pos].type == T_LVALUE)
+    if (pval && pos < (size_t)max
+     && sp[pos].type == T_LVALUE && sp[pos].x.lvalue_type == LVALUE_UNPROTECTED)
         transfer_svalue(sp[pos].u.lvalue, pval);
 } /* stack_put() */
 

@@ -7537,12 +7537,14 @@ f_reverse(svalue_t *sp)
      * an array, note the fact, and place it directly into the stack.
      * TODO: Allow protected ranges here.
      */
-    if (sp->type == T_LVALUE || sp->type == T_PROTECTED_LVALUE)
+    if ((sp->type == T_LVALUE && sp->x.lvalue_type == LVALUE_UNPROTECTED)
+      || sp->type == T_PROTECTED_LVALUE)
     {
         svalue_t * svp = sp;
         vector_t * vec = NULL;
 
-        while (svp->type == T_LVALUE || svp->type == T_PROTECTED_LVALUE)
+        while ((svp->type == T_LVALUE &&  svp->x.lvalue_type == LVALUE_UNPROTECTED)
+             || svp->type == T_PROTECTED_LVALUE)
         {
             svp = svp->u.lvalue;
         }

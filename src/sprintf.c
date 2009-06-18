@@ -604,8 +604,18 @@ svalue_to_string ( fmt_state_t *st
         break;
 
     case T_LVALUE:
-        stradd(st, &str, compact ? "l:" : "lvalue: ");
-        str = svalue_to_string(st, obj->u.lvalue, str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
+        switch(obj->x.lvalue_type)
+        {
+        default:
+            fatal("(sprintf) Illegal lvalue %p type %d\n", obj, obj->x.lvalue_type);
+            /* NOTREACHED */
+            break;
+
+        case LVALUE_UNPROTECTED:
+            stradd(st, &str, compact ? "l:" : "lvalue: ");
+            str = svalue_to_string(st, obj->u.lvalue, str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
+            break;
+        }
         break;
 
     case T_NUMBER:

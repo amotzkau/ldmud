@@ -162,6 +162,7 @@ extern void assign_svalue(svalue_t *dest, svalue_t *v);
 extern void copy_svalue_no_free (svalue_t *to, svalue_t *from);
 extern void transfer_svalue_no_free(svalue_t *dest, svalue_t *v);
 extern void transfer_svalue(svalue_t *dest, svalue_t *v);
+extern void assign_lvalue_no_free(svalue_t *dest, svalue_t *src);
 
 extern void put_c_string (svalue_t *sp, const char *p);
 extern void put_c_n_string (svalue_t *sp, const char *p, size_t len);
