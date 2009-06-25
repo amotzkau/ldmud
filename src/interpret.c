@@ -1194,7 +1194,7 @@ int_free_svalue (svalue_t *v)
         switch (v->x.lvalue_type)
         {
         default:
-            fatal("(assign_lrvalue_no_free) Illegal lvalue %p type %d\n", v, v->x.lvalue_type);
+            fatal("(free_svalue) Illegal lvalue %p type %d\n", v, v->x.lvalue_type);
             /* NOTREACHED */
             break;
 
@@ -1255,6 +1255,10 @@ int_free_svalue (svalue_t *v)
               }
 
             } /* switch (v->u.lvalue->type) */
+            break;
+
+        case LVALUE_UNPROTECTED_CHAR:
+            NOOP;
             break;
         }
         break; /* case T_LVALUE */
@@ -1751,6 +1755,8 @@ assign_from_lvalue:
             /* NOTREACHED */
             break;
 
+        /* TODO: There shouldn't be any unprotected lvalues at this point. */
+        /* TODO:: Remove this after the lvalue reorganisation. */
         case LVALUE_UNPROTECTED:
             from = from->u.lvalue;
             if (destructed_object_ref(from)) {
@@ -1857,6 +1863,8 @@ void assign_lrvalue_no_free (svalue_t *to, svalue_t *from)
             /* NOTREACHED */
             break;
 
+        /* TODO: There shouldn't be any unprotected lvalues at this point. */
+        /* TODO:: Remove this after the lvalue reorganisation. */
         case LVALUE_UNPROTECTED:
             to->u.lvalue = from;
             break;
@@ -1917,6 +1925,11 @@ assign_svalue (svalue_t *dest, svalue_t *v)
                 dest = dest->u.lvalue;
                 continue;
 
+            case LVALUE_UNPROTECTED_CHAR:
+                if (v->type == T_NUMBER)
+                    *dest->u.charp = (char)v->u.number;
+                return;
+
             } /* switch() */
             return;
 
@@ -1976,11 +1989,6 @@ assign_svalue (svalue_t *dest, svalue_t *v)
          * the assignment is done right here and now.
          * Note that 'dest' in some cases points to a protector structure.
          */
-
-        case T_CHAR_LVALUE:
-            if (v->type == T_NUMBER)
-                *dest->u.charp = (char)v->u.number;
-            return;
 
         case T_PROTECTED_CHAR_LVALUE:
           {
@@ -2077,11 +2085,6 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
  */
 
 {
-    /* Unravel the T_LVALUE chain, if any. */
-    while ((dest->type == T_LVALUE && dest->x.lvalue_type == LVALUE_UNPROTECTED)
-         || dest->type == T_PROTECTED_LVALUE)
-        dest = dest->u.lvalue;
-
     /* Free the <dest> svalue.
      * If a T_xxx_LVALUE is found, the transfer will be done here
      * immediately.
@@ -2125,19 +2128,36 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
             free_mapping(dest->u.map);
             break;
 
+        case T_LVALUE:
+            switch(dest->x.lvalue_type)
+            {
+            default:
+                fatal("(transfer_svalue) Illegal lvalue %p type %d\n", dest, dest->x.lvalue_type);
+                /* NOTREACHED */
+                break;
+
+            case LVALUE_UNPROTECTED:
+                dest = dest->u.lvalue;
+                continue;
+
+            case LVALUE_UNPROTECTED_CHAR:
+                if (v->type == T_NUMBER)
+                    *dest->u.charp = (char)v->u.number;
+                else
+                    free_svalue(v);
+                return;
+
+            } /* switch() */
+            return;
+
+        case T_PROTECTED_LVALUE:
+            dest = dest->u.lvalue;
+            continue;
+
         /* If the final svalue in dest is one of these lvalues,
          * the assignment is done right here and now.
          * Note that 'dest' in some cases points to a protector structure.
          */
-
-        case T_CHAR_LVALUE:
-            if (v->type == T_NUMBER)
-            {
-                *dest->u.charp = (char)v->u.number;
-            }
-            else
-                free_svalue(v);
-            return;
 
         case T_PROTECTED_CHAR_LVALUE:
           {
@@ -2588,8 +2608,8 @@ assign_protected_string_range ( struct protected_range_lvalue *dest
 } /* transfer_protected_string_range() */
 
 /*-------------------------------------------------------------------------*/
-static void
-add_number_to_lvalue (svalue_t *dest, int i, svalue_t *pre, svalue_t *post)
+static INLINE void
+add_number_to_lvalue (char* op, svalue_t *dest, int i, svalue_t *pre, svalue_t *post)
 
 /* Add the number <i> to the (PROTECTED_)LVALUE <dest>.
  * If <pre> is not null, the <dest> value before the addition is copied
@@ -2602,76 +2622,101 @@ add_number_to_lvalue (svalue_t *dest, int i, svalue_t *pre, svalue_t *post)
  */
 
 {
-    /* Deref the T_(PROTECTED_)LVALUES */
-    do
+    for(;;)
     {
-        dest = dest->u.lvalue;
-    }
-    while ((dest->type == T_LVALUE && dest->x.lvalue_type == LVALUE_UNPROTECTED)
-         || dest->type == T_PROTECTED_LVALUE);
-
-    /* Now increment the non-LVALUE */
-    switch (dest->type)
-    {
-    default:
-        errorf("Reference to bad type %s to ++/--\n", typename(dest->type));
-        break;
-
-    case T_NUMBER:
-        if (pre) put_number(pre, dest->u.number);
-        dest->u.number += i;
-        if (post) put_number(post, dest->u.number);
-        break;
-
-    case T_FLOAT:
-      {
-        STORE_DOUBLE_USED
-        double d;
-
-        d = READ_DOUBLE(dest);
-
-        if (pre)
+        switch (dest->type)
         {
-            pre->type = T_FLOAT;
-            STORE_DOUBLE(pre, d);
-        }
+        default:
+            errorf("Bad arg to %s: got '%s', expected numeric type.\n", op, typename(dest->type));
+            break;
 
-        d += (double)i;
-        STORE_DOUBLE(dest, d);
+        case T_NUMBER:
+            if ((i>0)
+               ?(dest->u.number > PINT_MAX-i)
+               :(dest->u.number < PINT_MIN-i))
+            {
+                errorf("Numeric overflow: (%"PRIdPINT")%s\n",
+                       dest->u.number, op);
+                /* NOTREACHED */
+                break;
+            }
 
-        if (post)
-        {
-            post->type = T_FLOAT;
-            STORE_DOUBLE(post, d);
-        }
+            if (pre) put_number(pre, dest->u.number);
+            dest->u.number += i;
+            if (post) put_number(post, dest->u.number);
+            break;
+
+        case T_FLOAT:
+          {
+            STORE_DOUBLE_USED
+            double d;
+
+            d = READ_DOUBLE(dest);
+
+            if (pre)
+            {
+                pre->type = T_FLOAT;
+                STORE_DOUBLE(pre, d);
+            }
+
+            d += (double)i;
+
+            if (d < (-DBL_MAX) || d > DBL_MAX)
+                errorf("Numeric overflow: (%g)%s\n", READ_DOUBLE(dest), op);
+
+            STORE_DOUBLE(dest, d);
+
+            if (post)
+            {
+                post->type = T_FLOAT;
+                STORE_DOUBLE(post, d);
+            }
+            break;
+          }
+
+        case T_LVALUE:
+            switch(dest->x.lvalue_type)
+            {
+            default:
+                fatal("(%s) Illegal lvalue %p type %d\n", op, dest, dest->x.lvalue_type);
+                /* NOTREACHED */
+                break;
+
+            case LVALUE_UNPROTECTED:
+                dest = dest->u.lvalue;
+                continue;
+
+            case LVALUE_UNPROTECTED_CHAR:
+                if (pre) put_number(pre, (unsigned char)*dest->u.charp);
+                *(dest->u.charp) += i;
+                if (post) put_number(post, (unsigned char)*dest->u.charp);
+                break;
+
+            } /* switch() */
+            break;
+
+        case T_PROTECTED_LVALUE:
+            dest = dest->u.lvalue;
+            continue;
+
+        case T_PROTECTED_CHAR_LVALUE:
+          {
+            struct protected_char_lvalue *p;
+
+            p = (struct protected_char_lvalue *)dest;
+            if (p->lvalue->type == T_STRING
+             && get_txt(p->lvalue->u.str) == p->start)
+            {
+                if (pre) put_number(pre, (unsigned char)*(p->v.u.charp));
+                i = (unsigned char)(*(p->v.u.charp) += i);
+                if (post) put_number(post, i);
+            }
+            break;
+          }
+        } /* switch() */
+
         break;
-      }
-
-    case T_PROTECTED_LVALUE:
-        add_number_to_lvalue(dest, i, pre, post);
-        break;
-
-    case T_CHAR_LVALUE:
-        if (pre) put_number(pre, (unsigned char)*dest->u.charp);
-        *(dest->u.charp) += i;
-        if (post) put_number(post, (unsigned char)*dest->u.charp);
-        break;
-
-    case T_PROTECTED_CHAR_LVALUE:
-      {
-        struct protected_char_lvalue *p;
-
-        p = (struct protected_char_lvalue *)dest;
-        if (p->lvalue->type == T_STRING
-         && get_txt(p->lvalue->u.str) == p->start)
-        {
-            if (pre) put_number(pre, (unsigned char)*(p->v.u.charp));
-            i = (unsigned char)(*(p->v.u.charp) += i);
-            if (post) put_number(post, i);
-        }
-        break;
-      }
-    } /* switch() */
+    } /* for() */
 } /* add_number_to_lvalue() */
 
 /*-------------------------------------------------------------------------*/
@@ -3710,6 +3755,19 @@ assign_lvalue_no_free (svalue_t *dest, svalue_t *src)
 } /* assign_lvalue_no_free() */
 
 /*-------------------------------------------------------------------------*/
+INLINE void
+assign_char_lvalue_no_free (svalue_t *dest, char *cp)
+
+/* Put an unprotected char lvalue to <cp> into <dest>.
+ * <dest> is considered empty at the time of call.
+ */
+{
+    dest->type = T_LVALUE;
+    dest->x.lvalue_type = LVALUE_UNPROTECTED_CHAR;
+    dest->u.charp = cp;
+} /* assign_char_lvalue_no_free() */
+
+/*-------------------------------------------------------------------------*/
 static INLINE svalue_t *
 push_indexed_lvalue (svalue_t *sp, bytecode_p pc)
 
@@ -4320,9 +4378,7 @@ index_lvalue (svalue_t *sp, bytecode_p pc)
 
         sp = i;
 
-        assign_lvalue_no_free(sp, &special_lvalue.v);
-        special_lvalue.v.type = T_CHAR_LVALUE;
-        special_lvalue.v.u.charp = cp;
+        assign_char_lvalue_no_free(sp, cp);
         return sp;
       }
 
@@ -4451,9 +4507,7 @@ rindex_lvalue (svalue_t *sp, bytecode_p pc)
         /* Remove the argument and return the result */
 
         sp = i;
-        assign_lvalue_no_free(sp, &special_lvalue.v);
-        special_lvalue.v.type = T_CHAR_LVALUE;
-        special_lvalue.v.u.charp = cp;
+        assign_char_lvalue_no_free(sp, cp);
         return sp;
       }
 
@@ -4528,9 +4582,7 @@ aindex_lvalue (svalue_t *sp, bytecode_p pc)
         /* Remove the argument and return the result */
 
         sp = i;
-        assign_lvalue_no_free(sp, &special_lvalue.v);
-        special_lvalue.v.type = T_CHAR_LVALUE;
-        special_lvalue.v.u.charp = cp;
+        assign_char_lvalue_no_free(sp, cp);
         return sp;
       }
 
@@ -9720,57 +9772,11 @@ again:
          * stack (not free()!, this lvalue is just a copy).
          */
 
-        svalue_t *svp;
-
-        /* Get the designated value */
         TYPE_TEST1(sp, T_LVALUE);
-        svp = sp->u.lvalue;
 
-        /* Now increment where we can */
-        if (svp->type == T_NUMBER)
-        {
-            if (svp->u.number == PINT_MAX)
-            {
-                ERRORF(("Numeric overflow: (%"PRIdPINT")++\n", 
-                        svp->u.number));
-                /* NOTREACHED */
-                break;
-            }
-            svp->u.number++;
-            sp--;
-            break;
-        }
-        else if (svp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            d = READ_DOUBLE(svp) + 1.0;
-            if (d < (-DBL_MAX) || d > DBL_MAX)
-                ERRORF(("Numeric overflow: (%g)++\n", READ_DOUBLE(svp)));
-            sp->type = T_FLOAT;
-            STORE_DOUBLE(svp, d);
-            sp--;
-            break;
-        }
-        else if (svp->type == T_CHAR_LVALUE)
-        {
-            (*svp->u.charp)++;
-            sp--;
-            break;
-        }
-        else if ((svp->type == T_LVALUE && svp->x.lvalue_type == LVALUE_UNPROTECTED)
-              || svp->type == T_PROTECTED_LVALUE)
-        {
-            inter_sp = sp;
-            add_number_to_lvalue(svp, 1, NULL, NULL);
-            sp--;
-            break;
-        }
-
-        ERRORF(("Bad arg to ++: got '%s', expected numeric type.\n"
-               , typename(svp->type)
-               ));
+        inter_sp = sp;
+        add_number_to_lvalue("++", sp, 1, NULL, NULL);
+        sp--;
         break;
     }
 
@@ -9783,57 +9789,11 @@ again:
          * stack (not free()!, this lvalue is just a copy).
          */
 
-        svalue_t *svp;
-
-        /* Get the designated value */
         TYPE_TEST1(sp, T_LVALUE);
-        svp = sp->u.lvalue;
 
-        /* Now decrement where we can */
-        if (svp->type == T_NUMBER)
-        {
-            if (svp->u.number == PINT_MIN)
-            {
-                ERRORF(("Numeric overflow: (%"PRIdPINT")--\n", 
-                        svp->u.number));
-                /* NOTREACHED */
-                break;
-            }
-            svp->u.number--;
-            sp--;
-            break;
-        }
-        else if (svp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            d = READ_DOUBLE(svp) - 1.0;
-            if (d < (-DBL_MAX) || d > DBL_MAX)
-                ERRORF(("Numeric overflow: (%g)--\n", READ_DOUBLE(svp)));
-            sp->type = T_FLOAT;
-            STORE_DOUBLE(svp, d);
-            sp--;
-            break;
-        }
-        else if (svp->type == T_CHAR_LVALUE)
-        {
-            (*svp->u.charp)--;
-            sp--;
-            break;
-        }
-        else if ((svp->type == T_LVALUE && svp->x.lvalue_type == LVALUE_UNPROTECTED)
-              || svp->type == T_PROTECTED_LVALUE)
-        {
-            inter_sp = sp;
-            add_number_to_lvalue(svp, -1,  NULL, NULL);
-            sp--;
-            break;
-        }
-
-        ERRORF(("Bad arg to --: got '%s', expected numeric type.\n"
-               , typename(svp->type)
-               ));
+        inter_sp = sp;
+        add_number_to_lvalue("--", sp, -1,  NULL, NULL);
+        sp--;
         break;
     }
 
@@ -9847,56 +9807,10 @@ again:
          * free()d.
          */
 
-        svalue_t *svp;
-
-        /* Get the designated value */
         TYPE_TEST1(sp, T_LVALUE);
-        svp = sp->u.lvalue;
 
-        /* Do the push and increment */
-        if (svp->type == T_NUMBER)
-        {
-            if (svp->u.number == PINT_MAX)
-            {
-                ERRORF(("Numeric overflow: (%"PRIdPINT")++\n", 
-                        svp->u.number));
-                /* NOTREACHED */
-                break;
-            }
-            put_number(sp,  svp->u.number++ );
-            break;
-        }
-        else if (svp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            d = READ_DOUBLE(svp);
-            sp->type = T_FLOAT;
-            STORE_DOUBLE(sp, d);
-            d += 1.0;
-            if (d < (-DBL_MAX) || d > DBL_MAX)
-                ERRORF(("Numeric overflow: (%g)++\n", READ_DOUBLE(svp)));
-            STORE_DOUBLE(svp, d);
-            break;
-        }
-        else if (svp->type == T_CHAR_LVALUE)
-        {
-            put_number(sp,  (unsigned char)(*svp->u.charp) );
-            (*svp->u.charp)++;
-            break;
-        }
-        else if ((svp->type == T_LVALUE && svp->x.lvalue_type == LVALUE_UNPROTECTED)
-              || svp->type == T_PROTECTED_LVALUE)
-        {
-            inter_sp = sp;
-            add_number_to_lvalue(svp, 1, sp, NULL);
-            break;
-        }
-
-        ERRORF(("Bad arg to ++: got '%s', expected numeric type.\n"
-               , typename(svp->type)
-               ));
+        inter_sp = sp;
+        add_number_to_lvalue("++", sp, 1, sp, NULL);
         break;
     }
 
@@ -9910,56 +9824,9 @@ again:
          * free()d.
          */
 
-        svalue_t *svp;
-
-        /* Get the designated value */
         TYPE_TEST1(sp, T_LVALUE);
-        svp = sp->u.lvalue;
-
-        /* Do the push and decrement */
-        if (svp->type == T_NUMBER)
-        {
-            if (svp->u.number == PINT_MIN)
-            {
-                ERRORF(("Numeric overflow: (%"PRIdPINT")--\n", 
-                        svp->u.number));
-                /* NOTREACHED */
-                break;
-            }
-            put_number(sp,  svp->u.number-- );
-            break;
-        }
-        else if (svp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            d = READ_DOUBLE(svp);
-            sp->type = T_FLOAT;
-            STORE_DOUBLE(sp, d);
-            d -= 1.0;
-            if (d < (-DBL_MAX) || d > DBL_MAX)
-                ERRORF(("Numeric overflow: (%g)--\n", READ_DOUBLE(svp)));
-            STORE_DOUBLE(svp, d);
-            break;
-        }
-        else if (svp->type == T_CHAR_LVALUE)
-        {
-            put_number(sp, (unsigned char)(*svp->u.charp) );
-            (*svp->u.charp)--;
-            break;
-        }
-        else if ((svp->type == T_LVALUE && svp->x.lvalue_type == LVALUE_UNPROTECTED)
-              || svp->type == T_PROTECTED_LVALUE)
-        {
-            inter_sp = sp;
-            add_number_to_lvalue(svp, -1, sp, NULL);
-            break;
-        }
-
-        ERRORF(("Bad arg to --: got '%s', expected numeric type.\n"
-               , typename(svp->type)
-               ));
+        inter_sp = sp;
+        add_number_to_lvalue("--", sp, -1, sp, NULL);
         break;
     }
 
@@ -9972,55 +9839,10 @@ again:
          * value. The lvalue itself is simply removed, not free()d.
          */
 
-        svalue_t *svp;
-
-        /* Get the designated value */
         TYPE_TEST1(sp, T_LVALUE);
-        svp = sp->u.lvalue;
 
-        /* Do the increment and push */
-        if (svp->type == T_NUMBER)
-        {
-            if (svp->u.number == PINT_MAX)
-            {
-                ERRORF(("Numeric overflow: ++(%"PRIdPINT")\n", 
-                        svp->u.number));
-                /* NOTREACHED */
-                break;
-            }
-            put_number(sp,  ++(svp->u.number) );
-            break;
-        }
-        else if (svp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            d = READ_DOUBLE(svp) + 1.0;
-            if (d < (-DBL_MAX) || d > DBL_MAX)
-                ERRORF(("Numeric overflow: ++(%g)\n", READ_DOUBLE(svp)));
-            sp->type = T_FLOAT;
-            STORE_DOUBLE(sp, d);
-            STORE_DOUBLE(svp, d);
-            break;
-        }
-        else if (svp->type == T_CHAR_LVALUE)
-        {
-            ++(*svp->u.charp);
-            put_number(sp,  (unsigned char)(*svp->u.charp) );
-            break;
-        }
-        else if ((svp->type == T_LVALUE && svp->x.lvalue_type == LVALUE_UNPROTECTED)
-              || svp->type == T_PROTECTED_LVALUE)
-        {
-            inter_sp = sp;
-            add_number_to_lvalue(svp, 1, NULL, sp);
-            break;
-        }
-
-        ERRORF(("Bad arg to ++: got '%s', expected numeric type.\n"
-               , typename(svp->type)
-               ));
+        inter_sp = sp;
+        add_number_to_lvalue("++", sp, 1, NULL, sp);
         break;
     }
 
@@ -10033,55 +9855,10 @@ again:
          * value. The lvalue itself is simply removed, not free()d.
          */
 
-        svalue_t *svp;
-
-        /* Get the designated value */
         TYPE_TEST1(sp, T_LVALUE);
-        svp = sp->u.lvalue;
 
-        /* Do the decrement and push */
-        if (svp->type == T_NUMBER)
-        {
-            if (svp->u.number == PINT_MIN)
-            {
-                ERRORF(("Numeric overflow: --(%"PRIdPINT")\n", 
-                        svp->u.number));
-                /* NOTREACHED */
-                break;
-            }
-            put_number(sp,  --(svp->u.number) );
-            break;
-        }
-        else if (svp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            d = READ_DOUBLE(svp) - 1.0;
-            if (d < (-DBL_MAX) || d > DBL_MAX)
-                ERRORF(("Numeric overflow: --(%g)\n", READ_DOUBLE(svp)));
-            sp->type = T_FLOAT;
-            STORE_DOUBLE(sp, d);
-            STORE_DOUBLE(svp, d);
-            break;
-        }
-        else if (svp->type == T_CHAR_LVALUE)
-        {
-            --(*svp->u.charp);
-            put_number(sp,  (unsigned char)(*svp->u.charp) );
-            break;
-        }
-        else if ((svp->type == T_LVALUE && svp->x.lvalue_type == LVALUE_UNPROTECTED)
-              || svp->type == T_PROTECTED_LVALUE)
-        {
-            inter_sp = sp;
-            add_number_to_lvalue(svp, -1, NULL, sp);
-            break;
-        }
-
-        ERRORF(("Bad arg to --: got '%s', expected numeric type.\n"
-               , typename(svp->type)
-               ));
+        inter_sp = sp;
+        add_number_to_lvalue("--", sp, -1, NULL, sp);
         break;
     }
 
@@ -10137,17 +9914,13 @@ again:
          * assign_svalue().
          */
 
-        svalue_t *dest;
-
-        /* Get the designated lvalue */
 #ifdef DEBUG
-        if (sp->type != T_LVALUE || sp->x.lvalue_type != LVALUE_UNPROTECTED)
+        if (sp->type != T_LVALUE)
             FATALF(("Bad left arg to F_ASSIGN: got '%s', expected 'lvalue'.\n"
                    , typename(sp->type)
                    ));
 #endif
-        dest = sp->u.lvalue;
-        assign_svalue(dest, sp-1);
+        assign_svalue(sp, sp-1);
         sp--;
         break;
     }
@@ -10163,12 +9936,12 @@ again:
          */
 
 #ifdef DEBUG
-        if (sp->type != T_LVALUE && sp->x.lvalue_type != LVALUE_UNPROTECTED)
+        if (sp->type != T_LVALUE)
             FATALF(("Bad left arg to F_VOID_ASSIGN: got '%s', expected 'lvalue'.\n"
                    , typename(sp->type)
                    ));
 #endif
-        transfer_svalue(sp->u.lvalue, sp-1);
+        transfer_svalue(sp, sp-1);
         sp -= 2;
         break;
     }
@@ -11860,297 +11633,317 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
-
-        /* Now do it */
-        switch(argp->type)
+        argp = sp;
+        for (;;)
         {
-
-        case T_STRING:  /* Adding to a string */
-          {
-            string_t *new_string;
-
-            /* Perform the addition, creating new_string */
-            if (type2 == T_STRING)
+            /* Now do it */
+            switch (argp->type)
             {
-                string_t *left, *right;
-                size_t len;
 
-                left = argp->u.str;
-                right = (sp-1)->u.str;
+            case T_STRING:  /* Adding to a string */
+              {
+                string_t *new_string;
 
-                len = mstrsize(left) + mstrsize(right);
-                DYN_STRING_COST(len)
-                new_string = mstr_add(left, right);
-                if (!new_string)
-                    ERRORF(("Out of memory (%zu bytes)\n", len));
-                free_string_svalue(sp-1);
-                sp -= 2;
-            }
-            else if (type2 == T_NUMBER)
-            {
-                char buff[80];
-                size_t len;
-
-                buff[sizeof(buff)-1] = '\0';
-                sprintf(buff, "%ld", (long)u2.number);
-                if (buff[sizeof(buff)-1] != '\0')
-                    FATAL("Buffer overflow in F_ADD_EQ: int number too big.\n");
-                len = mstrsize(argp->u.str)+strlen(buff);
-                DYN_STRING_COST(len)
-                new_string = mstr_add_txt(argp->u.str, buff, strlen(buff));
-                if (!new_string)
-                    ERRORF(("Out of memory (%lu bytes)\n"
-                           , (unsigned long) len
-                           ));
-                sp -= 2;
-            }
-            else if (type2 == T_FLOAT)
-            {
-                char buff[160];
-                size_t len;
-
-                buff[sizeof(buff)-1] = '\0';
-                sprintf(buff, "%g", READ_DOUBLE(sp-1) );
-                if (buff[sizeof(buff)-1] != '\0')
-                    FATAL("Buffer overflow in F_ADD_EQ: float number too big.\n");
-                len = mstrsize(argp->u.str) + strlen(buff);
-                DYN_STRING_COST(len)
-                new_string = mstr_add_txt(argp->u.str, buff, strlen(buff));
-                if (!new_string)
-                    ERRORF(("Out of memory (%zu bytes).\n", len));
-                sp -= 2;
-            }
-            else
-            {
-                OP_ARG_ERROR(2, TF_STRING|TF_FLOAT|TF_NUMBER, type2);
-                /* NOTREACHED */
-            }
-
-            /* Replace *argp by the new string */
-            free_string_svalue(argp);
-            put_string(argp, new_string);
-            break;
-          }
-
-        case T_NUMBER:  /* Add to a number */
-            if (type2 == T_NUMBER)
-            {
-                p_int left = argp->u.number;
-                p_int right = u2.number;
-
-                if ((left >= 0 && right >= 0 && PINT_MAX - left < right)
-                 || (left < 0 && right < 0 && PINT_MIN - left > right)
-                   )
+                /* Perform the addition, creating new_string */
+                if (type2 == T_STRING)
                 {
-                    ERRORF(("Numeric overflow: %"PRIdPINT" += %"PRIdPINT"\n"
-                           , left, right));
+                    string_t *left, *right;
+                    size_t len;
+
+                    left = argp->u.str;
+                    right = (sp-1)->u.str;
+
+                    len = mstrsize(left) + mstrsize(right);
+                    DYN_STRING_COST(len)
+                    new_string = mstr_add(left, right);
+                    if (!new_string)
+                        ERRORF(("Out of memory (%zu bytes)\n", len));
+                    free_string_svalue(sp-1);
+                    sp -= 2;
+                }
+                else if (type2 == T_NUMBER)
+                {
+                    char buff[80];
+                    size_t len;
+    
+                    buff[sizeof(buff)-1] = '\0';
+                    sprintf(buff, "%ld", (long)u2.number);
+                    if (buff[sizeof(buff)-1] != '\0')
+                        FATAL("Buffer overflow in F_ADD_EQ: int number too big.\n");
+                    len = mstrsize(argp->u.str)+strlen(buff);
+                    DYN_STRING_COST(len)
+                    new_string = mstr_add_txt(argp->u.str, buff, strlen(buff));
+                    if (!new_string)
+                        ERRORF(("Out of memory (%lu bytes)\n"
+                               , (unsigned long) len
+                               ));
+                    sp -= 2;
+                }
+                else if (type2 == T_FLOAT)
+                {
+                    char buff[160];
+                    size_t len;
+
+                    buff[sizeof(buff)-1] = '\0';
+                    sprintf(buff, "%g", READ_DOUBLE(sp-1) );
+                    if (buff[sizeof(buff)-1] != '\0')
+                        FATAL("Buffer overflow in F_ADD_EQ: float number too big.\n");
+                    len = mstrsize(argp->u.str) + strlen(buff);
+                    DYN_STRING_COST(len)
+                    new_string = mstr_add_txt(argp->u.str, buff, strlen(buff));
+                    if (!new_string)
+                        ERRORF(("Out of memory (%zu bytes).\n", len));
+                    sp -= 2;
+                }
+                else
+                {
+                    OP_ARG_ERROR(2, TF_STRING|TF_FLOAT|TF_NUMBER, type2);
+                    /* NOTREACHED */
+                }
+
+                /* Replace *argp by the new string */
+                free_string_svalue(argp);
+                put_string(argp, new_string);
+                break;
+              }
+
+            case T_NUMBER:  /* Add to a number */
+                if (type2 == T_NUMBER)
+                {
+                    p_int left = argp->u.number;
+                    p_int right = u2.number;
+
+                    if ((left >= 0 && right >= 0 && PINT_MAX - left < right)
+                     || (left < 0 && right < 0 && PINT_MIN - left > right)
+                       )
+                    {
+                        ERRORF(("Numeric overflow: %"PRIdPINT" += %"PRIdPINT"\n"
+                               , left, right));
+                        /* NOTREACHED */
+                        break;
+                    }
+
+                    if (instruction == F_VOID_ADD_EQ)
+                    {
+                        argp->u.number += u2.number;
+                        sp -= 2;
+                        goto again;
+                    }
+                    (--sp)->u.number = argp->u.number += u2.number;
+                    goto again;
+                }
+                else if (type2 == T_FLOAT)
+                {
+                    STORE_DOUBLE_USED
+                    double sum;
+
+                    sum = (double)(argp->u.number) + READ_DOUBLE(sp-1);
+                    if (sum < (-DBL_MAX) || sum > DBL_MAX)
+                        ERRORF(("Numeric overflow: %"PRIdPINT" + %g\n"
+                               , argp->u.number, READ_DOUBLE(sp-1)));
+                    argp->type = T_FLOAT;
+                    STORE_DOUBLE(argp, sum);
+                    if (instruction == F_VOID_ADD_EQ)
+                    {
+                        sp -= 2;
+                        goto again;
+                    }
+
+                    --sp;
+                    sp->type = T_FLOAT;
+                    STORE_DOUBLE(sp, sum);
+                    goto again;
+                }
+                else if (type2 == T_STRING)
+                {
+                    char buff[80];
+                    string_t *right, *res;
+                    size_t len;
+
+                    right = (sp-1)->u.str;
+                    buff[sizeof(buff)-1] = '\0';
+                    sprintf(buff, "%"PRIdPINT, argp->u.number);
+                    if (buff[sizeof(buff)-1] != '\0')
+                        FATAL("Buffer overflow in F_ADD_EQ: int number too big.\n");
+                    len = mstrsize(right)+strlen(buff);
+                    DYN_STRING_COST(len)
+                    res = mstr_add_to_txt(buff, strlen(buff), right);
+                    if (!res)
+                        ERRORF(("Out of memory (%zu bytes)\n", len));
+                    free_string_svalue(sp-1);
+
+                    /* Overwrite the number in argp */
+                    put_string(argp, res);
+
+                    if (instruction == F_VOID_ADD_EQ)
+                    {
+                        sp -= 2;
+                        goto again;
+                    }
+
+                    --sp;
+                    put_ref_string(sp, res);
+
+                    goto again;
+                }
+                else
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, type2);
+                    /* NOTREACHED */
+                }
+                break;
+
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_ADD_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
                     /* NOTREACHED */
                     break;
-                }
 
-                if (instruction == F_VOID_ADD_EQ)
-                {
-                    argp->u.number += u2.number;
-                    sp -= 2;
-                    goto again;
-                }
-                (--sp)->u.number = argp->u.number += u2.number;
-                goto again;
-            }
-            else if (type2 == T_FLOAT)
-            {
-                STORE_DOUBLE_USED
-                double sum;
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
 
-                sum = (double)(argp->u.number) + READ_DOUBLE(sp-1);
-                if (sum < (-DBL_MAX) || sum > DBL_MAX)
-                    ERRORF(("Numeric overflow: %"PRIdPINT" + %g\n"
-                           , argp->u.number, READ_DOUBLE(sp-1)));
-                argp->type = T_FLOAT;
-                STORE_DOUBLE(argp, sum);
-                if (instruction == F_VOID_ADD_EQ)
-                {
-                    sp -= 2;
-                    goto again;
-                }
+                case LVALUE_UNPROTECTED_CHAR: /* Add a number to a character. */
+                    if (type2 == T_NUMBER)
+                    {
+                        p_int left = (unsigned char)*argp->u.charp;
+                        p_int right = u2.number;
 
-                --sp;
-                sp->type = T_FLOAT;
-                STORE_DOUBLE(sp, sum);
-                goto again;
-            }
-            else if (type2 == T_STRING)
-            {
-                char buff[80];
-                string_t *right, *res;
-                size_t len;
+                        if ((left >= 0 && right >= 0 && PINT_MAX - left < right)
+                         || (left < 0 && right < 0 && PINT_MIN - left > right)
+                           )
+                        {
+                            /* TODO: characters have a maximum below PINT_MAX. */
+                            ERRORF(("Numeric overflow: %"PRIdPINT" += %"PRIdPINT"\n"
+                                   , left, right));
+                            /* NOTREACHED */
+                            break;
+                        }
 
-                right = (sp-1)->u.str;
-                buff[sizeof(buff)-1] = '\0';
-                sprintf(buff, "%"PRIdPINT, argp->u.number);
-                if (buff[sizeof(buff)-1] != '\0')
-                    FATAL("Buffer overflow in F_ADD_EQ: int number too big.\n");
-                len = mstrsize(right)+strlen(buff);
-                DYN_STRING_COST(len)
-                res = mstr_add_to_txt(buff, strlen(buff), right);
-                if (!res)
-                    ERRORF(("Out of memory (%zu bytes)\n", len));
-                free_string_svalue(sp-1);
-
-                /* Overwrite the number in argp */
-                put_string(argp, res);
-
-                if (instruction == F_VOID_ADD_EQ)
-                {
-                    sp -= 2;
-                    goto again;
-                }
-
-                --sp;
-                put_ref_string(sp, res);
-
-                goto again;
-            }
-            else
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, type2);
-                /* NOTREACHED */
-            }
-            break;
-
-        case T_CHAR_LVALUE:  /* Add to a character in a string */
-            if (type2 == T_NUMBER)
-            {
-                p_int left = (unsigned char)*argp->u.charp;
-                p_int right = u2.number;
-
-                if ((left >= 0 && right >= 0 && PINT_MAX - left < right)
-                 || (left < 0 && right < 0 && PINT_MIN - left > right)
-                   )
-                {
-                    ERRORF(("Numeric overflow: %"PRIdPINT" += %"PRIdPINT"\n"
-                           , left, right));
-                    /* NOTREACHED */
+                        if (instruction == F_VOID_ADD_EQ)
+                        {
+                            *argp->u.charp += u2.number;
+                            sp -= 2;
+                            goto again;
+                        }
+                        (--sp)->u.number = (unsigned char)(*argp->u.charp += u2.number);
+                        goto again;
+                    }
+                    else
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, type2);
+                        /* NOTREACHED */
+                    }
                     break;
-                }
+                } /* switch() */
+                break;
 
-                if (instruction == F_VOID_ADD_EQ)
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            case T_MAPPING:  /* Add to a mapping */
+                if (type2 != T_MAPPING)
                 {
-                    *argp->u.charp += u2.number;
+                    OP_ARG_ERROR(2, TF_MAPPING, type2);
+                    /* NOTREACHED */
+                }
+                else
+                {
+                    check_map_for_destr(u2.map);
+                    add_to_mapping(argp->u.map, u2.map);
                     sp -= 2;
+                    free_mapping(u2.map);
+                    if ((max_mapping_size && MAP_TOTAL_SIZE(argp->u.map) > (p_int)max_mapping_size)
+                     || (max_mapping_keys && MAP_SIZE(argp->u.map) > (p_int)max_mapping_keys)
+                      )
+                    {
+                        check_map_for_destr(argp->u.map);
+                        if (max_mapping_size && MAP_TOTAL_SIZE(argp->u.map) > (p_int)max_mapping_size)
+                            ERRORF(("Illegal mapping size: %"PRIdMPINT" elements "
+                                    "(%"PRIdPINT" x %"PRIdPINT")\n"
+                                   , (mp_int)MAP_TOTAL_SIZE(argp->u.map)
+                                   , MAP_SIZE(argp->u.map)
+                                   , argp->u.map->num_values));
+                        if (max_mapping_keys && MAP_SIZE(argp->u.map) > (p_int)max_mapping_keys)
+                            ERRORF(("Illegal mapping size: %"PRIdPINT" entries\n"
+                                   , MAP_SIZE(argp->u.map)
+                                  ));
+                    }
+                }
+                break;
+
+            case T_POINTER:  /* Add to an array */
+                if (type2 != T_POINTER)
+                {
+                    OP_ARG_ERROR(2, TF_POINTER, type2);
+                    /* NOTREACHED */
+                }
+                else
+                {
+                    vector_t *v;
+
+                    inter_sp = sp;
+                    inter_pc = pc;
+                    DYN_ARRAY_COST(VEC_SIZE(u2.vec)+VEC_SIZE(argp->u.vec));
+                    v = inter_add_array(u2.vec, &argp->u.vec);
+                    if (instruction == F_VOID_ADD_EQ)
+                    {
+                        sp -= 2;
+                        goto again;
+                    }
+                    sp--;
+                    sp->u.vec = ref_array(v);
                     goto again;
-                }
-                (--sp)->u.number = (unsigned char)(*argp->u.charp += u2.number);
-                goto again;
-            }
-            else
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, type2);
-                /* NOTREACHED */
-            }
-            break;
+                    }
+                break;
 
-        case T_MAPPING:  /* Add to a mapping */
-            if (type2 != T_MAPPING)
-            {
-                OP_ARG_ERROR(2, TF_MAPPING, type2);
-                /* NOTREACHED */
-            }
-            else
-            {
-                check_map_for_destr(u2.map);
-                add_to_mapping(argp->u.map, u2.map);
-                sp -= 2;
-                free_mapping(u2.map);
-                if ((max_mapping_size && MAP_TOTAL_SIZE(argp->u.map) > (p_int)max_mapping_size)
-                 || (max_mapping_keys && MAP_SIZE(argp->u.map) > (p_int)max_mapping_keys)
-                  )
+            case T_FLOAT:  /* Add to a float */
+                if (type2 == T_FLOAT)
                 {
-                    check_map_for_destr(argp->u.map);
-                    if (max_mapping_size && MAP_TOTAL_SIZE(argp->u.map) > (p_int)max_mapping_size)
-                        ERRORF(("Illegal mapping size: %"PRIdMPINT" elements "
-                                "(%"PRIdPINT" x %"PRIdPINT")\n"
-                               , (mp_int)MAP_TOTAL_SIZE(argp->u.map)
-                               , MAP_SIZE(argp->u.map)
-                               , argp->u.map->num_values));
-                    if (max_mapping_keys && MAP_SIZE(argp->u.map) > (p_int)max_mapping_keys)
-                        ERRORF(("Illegal mapping size: %"PRIdPINT" entries\n"
-                               , MAP_SIZE(argp->u.map)
-                              ));
-                }
-            }
-            break;
+                    STORE_DOUBLE_USED
+                    double d;
 
-        case T_POINTER:  /* Add to an array */
-            if (type2 != T_POINTER)
-            {
-                OP_ARG_ERROR(2, TF_POINTER, type2);
-                /* NOTREACHED */
-            }
-            else
-            {
-                vector_t *v;
-
-                inter_sp = sp;
-                inter_pc = pc;
-                DYN_ARRAY_COST(VEC_SIZE(u2.vec)+VEC_SIZE(argp->u.vec));
-                v = inter_add_array(u2.vec, &argp->u.vec);
-                if (instruction == F_VOID_ADD_EQ)
-                {
+                       /* don't use the address of u2, this would prevent putting
+                        * it in a register
+                        */
+                    d = READ_DOUBLE(argp) + READ_DOUBLE(sp-1);
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g + %g\n"
+                               , READ_DOUBLE(argp), READ_DOUBLE(sp-1)));
+                    STORE_DOUBLE(argp, d);
                     sp -= 2;
-                    goto again;
                 }
-                sp--;
-                sp->u.vec = ref_array(v);
-                goto again;
+                else if (type2 == T_NUMBER)
+                {
+                    STORE_DOUBLE_USED
+                    double d;
+
+                    d = READ_DOUBLE(argp) + (double)sp[-1].u.number;
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g + %"PRIdPINT"\n"
+                               , READ_DOUBLE(argp), (sp-1)->u.number));
+                    STORE_DOUBLE(argp, d);
+                    sp -= 2;
                 }
-            break;
+                else
+                {
+                    OP_ARG_ERROR(2, TF_FLOAT|TF_NUMBER, type2);
+                    /* NOTREACHED */
+                }
+                break;
 
-        case T_FLOAT:  /* Add to a float */
-            if (type2 == T_FLOAT)
-            {
-                STORE_DOUBLE_USED
-                double d;
-
-                   /* don't use the address of u2, this would prevent putting
-                    * it in a register
-                    */
-                d = READ_DOUBLE(argp) + READ_DOUBLE(sp-1);
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g + %g\n"
-                           , READ_DOUBLE(argp), READ_DOUBLE(sp-1)));
-                STORE_DOUBLE(argp, d);
-                sp -= 2;
-            }
-            else if (type2 == T_NUMBER)
-            {
-                STORE_DOUBLE_USED
-                double d;
-
-                d = READ_DOUBLE(argp) + (double)sp[-1].u.number;
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g + %"PRIdPINT"\n"
-                           , READ_DOUBLE(argp), (sp-1)->u.number));
-                STORE_DOUBLE(argp, d);
-                sp -= 2;
-            }
-            else
-            {
-                OP_ARG_ERROR(2, TF_FLOAT|TF_NUMBER, type2);
+            default:
+                OP_ARG_ERROR(1, TF_STRING|TF_FLOAT|TF_MAPPING|TF_POINTER|TF_NUMBER
+                            , argp->type);
                 /* NOTREACHED */
-            }
-            break;
+            } /* end of switch */
 
-        default:
-            OP_ARG_ERROR(1, TF_STRING|TF_FLOAT|TF_MAPPING|TF_POINTER|TF_NUMBER
-                        , argp->type);
-            /* NOTREACHED */
-        } /* end of switch */
+            /* No more lvalues to unravel. */
+            break;
+        } /* for() */
 
         /* If the instruction is F_ADD_EQ, leave the result on the stack */
         if (instruction != F_VOID_ADD_EQ)
@@ -12188,208 +11981,228 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        switch (argp->type)
+        for (;;)
         {
-        case T_NUMBER:  /* Subtract from a number */
-            if (type2 == T_NUMBER)
+            switch (argp->type)
             {
-                p_int left = argp->u.number;
-                p_int right = u2.number;
-
-                if ((left >= 0 && right < 0 && PINT_MAX + right < left)
-                 || (left < 0 && right >= 0 && PINT_MIN + right > left)
-                   )
+            case T_NUMBER:  /* Subtract from a number */
+                if (type2 == T_NUMBER)
                 {
-                    ERRORF(("Numeric overflow: %"PRIdPINT" -= %"PRIdPINT"\n"
-                           , left, right));
-                    /* NOTREACHED */
+                    p_int left = argp->u.number;
+                    p_int right = u2.number;
+    
+                    if ((left >= 0 && right < 0 && PINT_MAX + right < left)
+                     || (left < 0 && right >= 0 && PINT_MIN + right > left)
+                       )
+                    {
+                        ERRORF(("Numeric overflow: %"PRIdPINT" -= %"PRIdPINT"\n"
+                               , left, right));
+                        /* NOTREACHED */
+                        break;
+                    }
+                    sp--;
+                    sp->u.number = argp->u.number -= u2.number;
                     break;
                 }
-                sp--;
-                sp->u.number = argp->u.number -= u2.number;
-                break;
-            }
 
-            if (type2 == T_FLOAT)
-            {
-                STORE_DOUBLE_USED
-                double diff;
-
-                sp--;
-                diff = (double)(argp->u.number) - READ_DOUBLE(sp);
-                if (diff < (-DBL_MAX) || diff > DBL_MAX)
-                    ERRORF(("Numeric overflow: %"PRIdPINT" - %g\n"
-                           , argp->u.number, READ_DOUBLE(sp)));
-                STORE_DOUBLE(sp, diff);
-                sp->type = T_FLOAT;
-                assign_svalue_no_free(argp, sp);
-                break;
-            }
-
-            /* type2 of the wrong type */
-            OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, type2);
-            /* NOTREACHED */
-            break;
-
-        case T_CHAR_LVALUE:  /* Subtract from a char in a string */
-            if (type2 != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, type2);
-                /* NOTREACHED */
-            }
-
-            {
-                p_int left = (unsigned char)*argp->u.charp;
-                p_int right = u2.number;
-
-                if ((left >= 0 && right < 0 && PINT_MAX + right < left)
-                 || (left < 0 && right >= 0 && PINT_MIN + right > left)
-                   )
+                if (type2 == T_FLOAT)
                 {
-                    ERRORF(("Numeric overflow: %"PRIdPINT" -= %"PRIdPINT"\n"
-                           , left, right));
-                    /* NOTREACHED */
+                    STORE_DOUBLE_USED
+                    double diff;
+
+                    sp--;
+                    diff = (double)(argp->u.number) - READ_DOUBLE(sp);
+                    if (diff < (-DBL_MAX) || diff > DBL_MAX)
+                        ERRORF(("Numeric overflow: %"PRIdPINT" - %g\n"
+                               , argp->u.number, READ_DOUBLE(sp)));
+                    STORE_DOUBLE(sp, diff);
+                    sp->type = T_FLOAT;
+                    assign_svalue_no_free(argp, sp);
                     break;
                 }
-            }
 
-            sp--;
-            sp->u.number = (unsigned char)(*argp->u.charp -= u2.number);
-            break;
-
-        case T_STRING:   /* Subtract from a string */
-        {
-            string_t * result;
-
-            if (type2 != T_STRING)
-            {
-                OP_ARG_ERROR(2, TF_STRING, type2);
+                /* type2 of the wrong type */
+                OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, type2);
                 /* NOTREACHED */
-            }
+                break;
 
-            inter_sp = sp;
-            result = intersect_strings(argp->u.str, (sp-1)->u.str, MY_TRUE);
-            free_string_svalue(argp);
-            put_string(argp, result);
-            free_svalue(sp);
-            sp--;
-            free_string_svalue(sp);
-            put_ref_string(sp, result);
-            break;
-        }
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_SUB_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
 
-        case T_POINTER:  /* Subtract from an array */
-          {
-            vector_t *v, *v_old;
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
 
-            if (type2 != T_POINTER)
-            {
-                OP_ARG_ERROR(2, TF_POINTER, type2);
-                /* NOTREACHED */
-            }
+                case LVALUE_UNPROTECTED_CHAR:  /* Subtract from a char in a string */
+                    if (type2 != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, type2);
+                        /* NOTREACHED */
+                    }
 
-            v = u2.vec;
+                    {
+                        p_int left = (unsigned char)*argp->u.charp;
+                        p_int right = u2.number;
 
-            /* Duplicate the minuend array if necessary, as
-             * the subtraction will change and free it
-             */
-            if (v->ref > 1)
-            {
-                deref_array(v);
-                v = slice_array(v, 0, (mp_int)VEC_SIZE(v)-1 );
-            }
-            sp--;
-            v_old = argp->u.vec;
-            v = subtract_array(v_old, v);
-            argp->u.vec = v;
-            put_ref_array(sp, v);
-            break;
-          }
+                        if ((left >= 0 && right < 0 && PINT_MAX + right < left)
+                         || (left < 0 && right >= 0 && PINT_MIN + right > left)
+                           )
+                        {
+                            ERRORF(("Numeric overflow: %"PRIdPINT" -= %"PRIdPINT"\n"
+                                   , left, right));
+                            /* NOTREACHED */
+                            break;
+                        }
+                    }
 
-        case T_FLOAT:  /* Subtract from a float */
-            if (type2 == T_FLOAT)
-            {
-                STORE_DOUBLE_USED
-                double d;
+                    sp--;
+                    sp->u.number = (unsigned char)(*argp->u.charp -= u2.number);
+                    break;
+                } /* switch() */
+                break;
 
-                /* don't use the address of u2, this would prevent putting it
-                 * in a register
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            case T_STRING:   /* Subtract from a string */
+              {
+                string_t * result;
+
+                if (type2 != T_STRING)
+                {
+                    OP_ARG_ERROR(2, TF_STRING, type2);
+                    /* NOTREACHED */
+                }
+
+                inter_sp = sp;
+                result = intersect_strings(argp->u.str, (sp-1)->u.str, MY_TRUE);
+                free_string_svalue(argp);
+                put_string(argp, result);
+                free_svalue(sp);
+                sp--;
+                free_string_svalue(sp);
+                put_ref_string(sp, result);
+                break;
+              }
+
+            case T_POINTER:  /* Subtract from an array */
+              {
+                vector_t *v, *v_old;
+
+                if (type2 != T_POINTER)
+                {
+                    OP_ARG_ERROR(2, TF_POINTER, type2);
+                    /* NOTREACHED */
+                }
+
+                v = u2.vec;
+
+                /* Duplicate the minuend array if necessary, as
+                 * the subtraction will change and free it
                  */
-                sp--;
-                d = READ_DOUBLE(argp) - READ_DOUBLE(sp);
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g + %g\n"
-                           , READ_DOUBLE(argp), READ_DOUBLE(sp)));
-                STORE_DOUBLE(argp, d);
-                *sp = *argp;
-            }
-            else if (type2 == T_NUMBER)
-            {
-                STORE_DOUBLE_USED
-                double d;
-
-                sp--;
-                d = READ_DOUBLE(argp) - (double)sp->u.number;
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g + %"PRIdPINT"\n"
-                           , READ_DOUBLE(argp), sp->u.number));
-                STORE_DOUBLE(argp, d);
-                *sp = *argp;
-            }
-            else
-            {
-                OP_ARG_ERROR(2, TF_FLOAT|TF_NUMBER, type2);
-                /* NOTREACHED */
-            }
-            break;
-
-        case T_MAPPING:  /* Subtract from a mapping */
-            if (type2 == T_MAPPING)
-            {
-                mapping_t *m;
-
-                sp--;
-                m = sp->u.map;
-                check_map_for_destr(m);
-
-                /* Test for the special case 'm - m' */
-                if (m == argp->u.map)
+                if (v->ref > 1)
                 {
-                    /* m->ref is > 1, because the content of the lvalue is
-                     * associated with a ref
-                     */
-                    deref_mapping(m);
-                    m = copy_mapping(m);
+                    deref_array(v);
+                    v = slice_array(v, 0, (mp_int)VEC_SIZE(v)-1 );
                 }
+                sp--;
+                v_old = argp->u.vec;
+                v = subtract_array(v_old, v);
+                argp->u.vec = v;
+                put_ref_array(sp, v);
+                break;
+              }
 
-                walk_mapping(m, sub_from_mapping_filter, argp->u.map);
-                free_mapping(m);
-                sp->u.map = ref_mapping(argp->u.map);
-            }
-            else if (type2 == T_MAPPING && sp[-1].u.map->num_values)
-            {
-                ERROR("Bad right arg to -=: mapping has values.\n");
+            case T_FLOAT:  /* Subtract from a float */
+                if (type2 == T_FLOAT)
+                {
+                    STORE_DOUBLE_USED
+                    double d;
+
+                    /* don't use the address of u2, this would prevent putting it
+                     * in a register
+                     */
+                    sp--;
+                    d = READ_DOUBLE(argp) - READ_DOUBLE(sp);
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g + %g\n"
+                               , READ_DOUBLE(argp), READ_DOUBLE(sp)));
+                    STORE_DOUBLE(argp, d);
+                    *sp = *argp;
+                }
+                else if (type2 == T_NUMBER)
+                {
+                    STORE_DOUBLE_USED
+                    double d;
+
+                    sp--;
+                    d = READ_DOUBLE(argp) - (double)sp->u.number;
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g + %"PRIdPINT"\n"
+                               , READ_DOUBLE(argp), sp->u.number));
+                    STORE_DOUBLE(argp, d);
+                    *sp = *argp;
+                }
+                else
+                {
+                    OP_ARG_ERROR(2, TF_FLOAT|TF_NUMBER, type2);
+                    /* NOTREACHED */
+                }
+                break;
+
+            case T_MAPPING:  /* Subtract from a mapping */
+                if (type2 == T_MAPPING)
+                {
+                    mapping_t *m;
+
+                    sp--;
+                    m = sp->u.map;
+                    check_map_for_destr(m);
+
+                    /* Test for the special case 'm - m' */
+                    if (m == argp->u.map)
+                    {
+                        /* m->ref is > 1, because the content of the lvalue is
+                         * associated with a ref
+                         */
+                        deref_mapping(m);
+                        m = copy_mapping(m);
+                    }
+
+                    walk_mapping(m, sub_from_mapping_filter, argp->u.map);
+                    free_mapping(m);
+                    sp->u.map = ref_mapping(argp->u.map);
+                }
+                else if (type2 == T_MAPPING && sp[-1].u.map->num_values)
+                {
+                    ERROR("Bad right arg to -=: mapping has values.\n");
+                    /* NOTREACHED */
+                }
+                else
+                {
+                    OP_ARG_ERROR(2, TF_MAPPING, type2);
+                    /* NOTREACHED */
+                }
+                break;
+
+            default:
+                OP_ARG_ERROR(1, TF_STRING|TF_FLOAT|TF_MAPPING|TF_POINTER|TF_NUMBER
+                            , argp->type);
                 /* NOTREACHED */
-            }
-            else
-            {
-                OP_ARG_ERROR(2, TF_MAPPING, type2);
-                /* NOTREACHED */
-            }
+            } /* end of switch */
+
+            /* No more lvalues. */
             break;
-
-        default:
-            OP_ARG_ERROR(1, TF_STRING|TF_FLOAT|TF_MAPPING|TF_POINTER|TF_NUMBER
-                        , argp->type);
-            /* NOTREACHED */
-        } /* end of switch */
+        } /* for() */
         break;
     }
 
@@ -12415,270 +12228,292 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type == T_NUMBER)
+            switch (argp->type)
             {
-                p_int left = argp->u.number;
-                p_int right = sp->u.number;
-
-                if (left > 0 && right > 0)
+            case T_NUMBER:
+                sp--;
+                if (sp->type == T_NUMBER)
                 {
-                    if ((left != 0 && PINT_MAX / left < right)
-                     || (right != 0 && PINT_MAX / right < left)
-                       )
+                    p_int left = argp->u.number;
+                    p_int right = sp->u.number;
+
+                    if (left > 0 && right > 0)
                     {
-                        ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
-                                PRIdPINT"\n"
-                               , left, right));
-                        /* NOTREACHED */
-                        break;
+                        if ((left != 0 && PINT_MAX / left < right)
+                         || (right != 0 && PINT_MAX / right < left)
+                           )
+                        {
+                            ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
+                                    PRIdPINT"\n"
+                                   , left, right));
+                            /* NOTREACHED */
+                            break;
+                        }
                     }
-                }
-                else if (left < 0 && right < 0)
+                    else if (left < 0 && right < 0)
+                    {
+                        if ((left != 0 && PINT_MAX / left > right)
+                         || (right != 0 && PINT_MAX / right > left)
+                           )
+                        {
+                            ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
+                                    PRIdPINT"\n"
+                                   , left, right));
+                            /* NOTREACHED */
+                            break;
+                        }
+                    }
+                    else if (left != 0 && right != 0)
+                    {
+                        if ((left > 0 && PINT_MIN / left > right)
+                         || (right > 0 && PINT_MIN / right > left)
+                           )
+                        {
+                            ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
+                                    PRIdPINT"\n"
+                                   , left, right));
+                            /* NOTREACHED */
+                            break;
+                        }
+                    }
+                    sp->u.number = argp->u.number *= sp->u.number;
+                    break;
+                } /* type2 == T_NUMBER */
+
+                if (sp->type == T_FLOAT)
                 {
-                    if ((left != 0 && PINT_MAX / left > right)
-                     || (right != 0 && PINT_MAX / right > left)
-                       )
-                    {
-                        ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
-                                PRIdPINT"\n"
-                               , left, right));
-                        /* NOTREACHED */
-                        break;
-                    }
+                    STORE_DOUBLE_USED
+                    double product;
+
+                    product = argp->u.number * READ_DOUBLE(sp);
+                    if (product < (-DBL_MAX) || product > DBL_MAX)
+                        ERRORF(("Numeric overflow: %"PRIdPINT" * %g\n"
+                               , argp->u.number, READ_DOUBLE(sp)));
+                    STORE_DOUBLE(sp, product);
+                    sp->type = T_FLOAT;
+                    assign_svalue_no_free(argp, sp);
+                    break;
                 }
-                else if (left != 0 && right != 0)
-                {
-                    if ((left > 0 && PINT_MIN / left > right)
-                     || (right > 0 && PINT_MIN / right > left)
-                       )
-                    {
-                        ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
-                                PRIdPINT"\n"
-                               , left, right));
-                        /* NOTREACHED */
-                        break;
-                    }
-                }
-                sp->u.number = argp->u.number *= sp->u.number;
-                break;
-            } /* type2 == T_NUMBER */
 
-            if (sp->type == T_FLOAT)
-            {
-                STORE_DOUBLE_USED
-                double product;
-
-                product = argp->u.number * READ_DOUBLE(sp);
-                if (product < (-DBL_MAX) || product > DBL_MAX)
-                    ERRORF(("Numeric overflow: %"PRIdPINT" * %g\n"
-                           , argp->u.number, READ_DOUBLE(sp)));
-                STORE_DOUBLE(sp, product);
-                sp->type = T_FLOAT;
-                assign_svalue_no_free(argp, sp);
-                break;
-            }
-
-            /* Unsupported type2 */
-            OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, sp->type);
-            /* NOTREACHED */
-        }
-
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            {
-                p_int left = (unsigned char)*argp->u.charp;
-                p_int right = sp->u.number;
-
-                if (left > 0 && right > 0)
-                {
-                    if ((left != 0 && PINT_MAX / left < right)
-                     || (right != 0 && PINT_MAX / right < left)
-                       )
-                    {
-                        ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
-                                PRIdPINT"\n", left, right));
-                        /* NOTREACHED */
-                        break;
-                    }
-                }
-                else if (left < 0 && right < 0)
-                {
-                    if ((left != 0 && PINT_MAX / left > right)
-                     || (right != 0 && PINT_MAX / right > left)
-                       )
-                    {
-                        ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
-                                PRIdPINT"\n", left, right));
-                        /* NOTREACHED */
-                        break;
-                    }
-                }
-                else if (left != 0 && right != 0)
-                {
-                    if ((left > 0 && PINT_MIN / left > right)
-                     || (right > 0 && PINT_MIN / right > left)
-                       )
-                    {
-                        ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
-                                PRIdPINT"\n", left, right));
-                        /* NOTREACHED */
-                        break;
-                    }
-                }
-            }
-            sp->u.number = (unsigned char)(*argp->u.charp *= sp->u.number);
-            break;
-        }
-
-        if (argp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            sp--;
-            if (sp->type == T_FLOAT)
-            {
-                d = READ_DOUBLE(argp) * READ_DOUBLE(sp);
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g * %g\n"
-                           , READ_DOUBLE(argp), READ_DOUBLE(sp)));
-                STORE_DOUBLE(argp, d);
-                *sp = *argp;
-            }
-            else if (sp->type == T_NUMBER)
-            {
-                d = READ_DOUBLE(argp) * (double)sp->u.number;
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g * %"PRIdPINT"\n"
-                           , READ_DOUBLE(argp), sp->u.number));
-                STORE_DOUBLE(argp, d);
-                *sp = *argp;
-            }
-            else
-            {
+                /* Unsupported type2 */
                 OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, sp->type);
                 /* NOTREACHED */
-            }
-            break;
-        }
+                break;
 
-        if (argp->type == T_STRING)
-        {
-            string_t * result;
-            size_t reslen;
-            size_t len;
-
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            if (sp->u.number < 0)
-            {
-                ERROR("Bad right arg to *=: negative number\n");
-                /* NOTREACHED */
-            }
-
-            len = mstrsize(argp->u.str);
-
-            if (len > (size_t)PINT_MAX
-             || (   len != 0
-                 && PINT_MAX / (p_int)len < sp->u.number)
-             || (   sp->u.number != 0
-                 && PINT_MAX / sp->u.number < (p_int)len)
-               )
-                ERRORF(("Result string too long (%"PRIdPINT" * %zu).\n"
-                       , sp->u.number, len
-                       ));
-
-            reslen = (size_t)sp->u.number * len;
-            result = mstr_repeat(argp->u.str, (size_t)sp->u.number);
-            if (!result)
-                ERRORF(("Out of memory (%zu bytes).\n", reslen));
-
-            DYN_STRING_COST(reslen)
-
-            free_string_svalue(argp);
-            put_string(argp, result);
-            assign_svalue_no_free(sp, argp);
-            break;
-        }
-
-        if (argp->type == T_POINTER)
-        {
-            vector_t *result;
-            mp_int reslen;
-            p_uint len;
-
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            if (sp->u.number < 0)
-            {
-                ERROR("Bad right arg to *=: negative number\n");
-                /* NOTREACHED */
-            }
-
-            inter_sp = sp;
-            inter_pc = pc;
-            len = VEC_SIZE(argp->u.vec);
-            reslen = sp->u.number * (mp_int)len;
-            result = allocate_uninit_array(reslen);
-            DYN_ARRAY_COST(reslen);
-
-            if (sp->u.number > 0 && len)
-            {
-                p_uint left;
-                svalue_t *from, *to;
-
-                /* Seed result[] with one copy of the array.
-                 */
-                for ( from = argp->u.vec->item, to = result->item, left = len
-                    ; left
-                    ; from++, to++, left--)
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
                 {
-                    assign_svalue_no_free(to, from);
-                } /* for() seed */
+                default:
+                    fatal("(F_MULT_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
 
-                /* Now fill the remainder of the vector with
-                 * the values already copied in there.
-                 */
-                for (from = result->item, left = reslen - len
-                    ; left
-                    ; to++, from++, left--
-                    )
-                    assign_svalue_no_free(to, from);
-            } /* if (len) */
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
 
-            free_svalue(argp);
-            put_array(argp, result);
-            assign_svalue_no_free(sp, argp);
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    {
+                        p_int left = (unsigned char)*argp->u.charp;
+                        p_int right = sp->u.number;
+
+                        if (left > 0 && right > 0)
+                        {
+                            if ((left != 0 && PINT_MAX / left < right)
+                             || (right != 0 && PINT_MAX / right < left)
+                               )
+                            {
+                                ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
+                                        PRIdPINT"\n", left, right));
+                                /* NOTREACHED */
+                                break;
+                            }
+                        }
+                        else if (left < 0 && right < 0)
+                        {
+                            if ((left != 0 && PINT_MAX / left > right)
+                             || (right != 0 && PINT_MAX / right > left)
+                               )
+                            {
+                                ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
+                                        PRIdPINT"\n", left, right));
+                                /* NOTREACHED */
+                                break;
+                            }
+                        }
+                        else if (left != 0 && right != 0)
+                        {
+                            if ((left > 0 && PINT_MIN / left > right)
+                             || (right > 0 && PINT_MIN / right > left)
+                               )
+                            {
+                                ERRORF(("Numeric overflow: %"PRIdPINT" *= %"
+                                        PRIdPINT"\n", left, right));
+                                /* NOTREACHED */
+                                break;
+                            }
+                        }
+                    }
+                    sp->u.number = (unsigned char)(*argp->u.charp *= sp->u.number);
+                    break;
+
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            case T_FLOAT:
+              {
+                STORE_DOUBLE_USED
+                double d;
+
+                sp--;
+                if (sp->type == T_FLOAT)
+                {
+                    d = READ_DOUBLE(argp) * READ_DOUBLE(sp);
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g * %g\n"
+                               , READ_DOUBLE(argp), READ_DOUBLE(sp)));
+                    STORE_DOUBLE(argp, d);
+                    *sp = *argp;
+                }
+                else if (sp->type == T_NUMBER)
+                {
+                    d = READ_DOUBLE(argp) * (double)sp->u.number;
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g * %"PRIdPINT"\n"
+                               , READ_DOUBLE(argp), sp->u.number));
+                    STORE_DOUBLE(argp, d);
+                    *sp = *argp;
+                }
+                else
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, sp->type);
+                    /* NOTREACHED */
+                }
+                break;
+              }
+
+            case T_STRING:
+              {
+                string_t * result;
+                size_t reslen;
+                size_t len;
+
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                if (sp->u.number < 0)
+                {
+                    ERROR("Bad right arg to *=: negative number\n");
+                    /* NOTREACHED */
+                }
+
+                len = mstrsize(argp->u.str);
+
+                if (len > (size_t)PINT_MAX
+                 || (   len != 0
+                     && PINT_MAX / (p_int)len < sp->u.number)
+                 || (   sp->u.number != 0
+                     && PINT_MAX / sp->u.number < (p_int)len)
+                   )
+                    ERRORF(("Result string too long (%"PRIdPINT" * %zu).\n"
+                           , sp->u.number, len
+                           ));
+
+                reslen = (size_t)sp->u.number * len;
+                result = mstr_repeat(argp->u.str, (size_t)sp->u.number);
+                if (!result)
+                    ERRORF(("Out of memory (%zu bytes).\n", reslen));
+
+                DYN_STRING_COST(reslen)
+
+                free_string_svalue(argp);
+                put_string(argp, result);
+                assign_svalue_no_free(sp, argp);
+                break;
+              }
+
+            case T_POINTER:
+              {
+                vector_t *result;
+                mp_int reslen;
+                p_uint len;
+
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                if (sp->u.number < 0)
+                {
+                    ERROR("Bad right arg to *=: negative number\n");
+                    /* NOTREACHED */
+                }
+
+                inter_sp = sp;
+                inter_pc = pc;
+                len = VEC_SIZE(argp->u.vec);
+                reslen = sp->u.number * (mp_int)len;
+                result = allocate_uninit_array(reslen);
+                DYN_ARRAY_COST(reslen);
+
+                if (sp->u.number > 0 && len)
+                {
+                    p_uint left;
+                    svalue_t *from, *to;
+
+                    /* Seed result[] with one copy of the array.
+                     */
+                    for ( from = argp->u.vec->item, to = result->item, left = len
+                        ; left
+                        ; from++, to++, left--)
+                    {
+                        assign_svalue_no_free(to, from);
+                    } /* for() seed */
+
+                    /* Now fill the remainder of the vector with
+                     * the values already copied in there.
+                     */
+                    for (from = result->item, left = reslen - len
+                        ; left
+                        ; to++, from++, left--
+                        )
+                        assign_svalue_no_free(to, from);
+                } /* if (len) */
+
+                free_svalue(argp);
+                put_array(argp, result);
+                assign_svalue_no_free(sp, argp);
+                break;
+              }
+
+            default:
+                OP_ARG_ERROR(1, TF_STRING|TF_FLOAT|TF_POINTER|TF_NUMBER
+                            , argp->type);
+                /* NOTREACHED */
+                break;
+            } /* switch() */
+
             break;
-        }
-
-        OP_ARG_ERROR(1, TF_STRING|TF_FLOAT|TF_POINTER|TF_NUMBER
-                    , argp->type);
-        /* NOTREACHED */
+        } /* for() */
         break;
     }
 
@@ -12702,105 +12537,127 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
-        /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type == T_NUMBER)
+            switch (argp->type)
             {
-                if (sp->u.number == 0)
-                    ERROR("Division by zero\n");
-                if (argp->u.number == PINT_MIN && sp->u.number == -1)
-                    ERRORF(("Numeric overflow: %"PRIdPINT" / -1\n"
-                           , argp->u.number
-                           ));
-                sp->u.number = argp->u.number /= sp->u.number;
-                break;
-            }
+            case T_NUMBER:
+                sp--;
+                if (sp->type == T_NUMBER)
+                {
+                    if (sp->u.number == 0)
+                        ERROR("Division by zero\n");
+                    if (argp->u.number == PINT_MIN && sp->u.number == -1)
+                        ERRORF(("Numeric overflow: %"PRIdPINT" / -1\n"
+                               , argp->u.number
+                               ));
+                    sp->u.number = argp->u.number /= sp->u.number;
+                    break;
+                }
 
-            if (sp->type == T_FLOAT)
-            {
-                double dtmp;
-                STORE_DOUBLE_USED
+                if (sp->type == T_FLOAT)
+                {
+                    double dtmp;
+                    STORE_DOUBLE_USED
 
-                dtmp = READ_DOUBLE( sp );
-                if (dtmp == 0.)
-                    ERROR("Division by zero\n");
-                dtmp = (double)argp->u.number / dtmp;
-                if (dtmp < (-DBL_MAX) || dtmp > DBL_MAX)
-                    ERRORF(("Numeric overflow: %"PRIdPINT" / %g\n"
-                           , argp->u.number, READ_DOUBLE(sp)));
-                STORE_DOUBLE(sp, dtmp);
-                sp->type = T_FLOAT;
-                assign_svalue_no_free(argp, sp);
-                break;
-            }
+                    dtmp = READ_DOUBLE( sp );
+                    if (dtmp == 0.)
+                        ERROR("Division by zero\n");
+                    dtmp = (double)argp->u.number / dtmp;
+                    if (dtmp < (-DBL_MAX) || dtmp > DBL_MAX)
+                        ERRORF(("Numeric overflow: %"PRIdPINT" / %g\n"
+                               , argp->u.number, READ_DOUBLE(sp)));
+                    STORE_DOUBLE(sp, dtmp);
+                    sp->type = T_FLOAT;
+                    assign_svalue_no_free(argp, sp);
+                    break;
+                }
 
-            /* Unsupported type2 */
-            OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, sp->type);
-            /* NOTREACHED */
-        }
-
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            if (sp->u.number == 0)
-                ERROR("Division by zero\n");
-            sp->u.number = (unsigned char)(*argp->u.charp /= sp->u.number);
-            break;
-        }
-
-        if (argp->type == T_FLOAT)
-        {
-            STORE_DOUBLE_USED
-            double d;
-
-            sp--;
-            if (sp->type == T_FLOAT)
-            {
-                d = READ_DOUBLE(sp);
-                if (d == 0.0)
-                    ERROR("Division by zero\n");
-                d = READ_DOUBLE(argp) / d;
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g / %g\n"
-                           , READ_DOUBLE(argp), READ_DOUBLE(sp)));
-                STORE_DOUBLE(argp, d);
-                *sp = *argp;
-            }
-            else if (sp->type == T_NUMBER)
-            {
-                p_int i;
-                i = sp->u.number;
-                if (i == 0)
-                    ERROR("Division by zero\n");
-                d = READ_DOUBLE(argp) / (double)i;
-                if (d < (-DBL_MAX) || d > DBL_MAX)
-                    ERRORF(("Numeric overflow: %g / %"PRIdPINT"\n"
-                           , READ_DOUBLE(argp), sp->u.number));
-                STORE_DOUBLE(argp, d);
-                *sp = *argp;
-            }
-            else
-            {
+                /* Unsupported type2 */
                 OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, sp->type);
                 /* NOTREACHED */
-            }
+                break;
+
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_DIV_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
+
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    if (sp->u.number == 0)
+                        ERROR("Division by zero\n");
+                    sp->u.number = (unsigned char)(*argp->u.charp /= sp->u.number);
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            case T_FLOAT:
+              {
+                STORE_DOUBLE_USED
+                double d;
+
+                sp--;
+                if (sp->type == T_FLOAT)
+                {
+                    d = READ_DOUBLE(sp);
+                    if (d == 0.0)
+                        ERROR("Division by zero\n");
+                    d = READ_DOUBLE(argp) / d;
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g / %g\n"
+                               , READ_DOUBLE(argp), READ_DOUBLE(sp)));
+                    STORE_DOUBLE(argp, d);
+                    *sp = *argp;
+                }
+                else if (sp->type == T_NUMBER)
+                {
+                    p_int i;
+                    i = sp->u.number;
+                    if (i == 0)
+                        ERROR("Division by zero\n");
+                    d = READ_DOUBLE(argp) / (double)i;
+                    if (d < (-DBL_MAX) || d > DBL_MAX)
+                        ERRORF(("Numeric overflow: %g / %"PRIdPINT"\n"
+                               , READ_DOUBLE(argp), sp->u.number));
+                    STORE_DOUBLE(argp, d);
+                    *sp = *argp;
+                }
+                else
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER|TF_FLOAT, sp->type);
+                    /* NOTREACHED */
+                }
+                break;
+              }
+
+            default:
+                OP_ARG_ERROR(1, TF_FLOAT|TF_NUMBER, argp->type);
+                /* NOTREACHED */
+                break;
+            } /* switch() */
+
             break;
-        }
-        OP_ARG_ERROR(1, TF_FLOAT|TF_NUMBER, argp->type);
-        /* NOTREACHED */
+        } /* for() */
+        break;
     }
 
     CASE(F_MOD_EQ);                 /* --- mod_eq              --- */
@@ -12823,43 +12680,64 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type != T_NUMBER)
+            switch (argp->type)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            if (sp->u.number == 0)
-                ERROR("Division by zero\n");
-            sp->u.number = argp->u.number %= sp->u.number;
-            break;
-        }
+            case T_NUMBER:
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                if (sp->u.number == 0)
+                    ERROR("Division by zero\n");
+                sp->u.number = argp->u.number %= sp->u.number;
+                break;
 
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            if (sp->u.number == 0)
-                ERROR("Division by zero\n");
-            sp->u.number = (unsigned char)(*argp->u.charp %= sp->u.number);
-            break;
-        }
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_MOD_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
 
-        OP_ARG_ERROR(1, TF_NUMBER, argp->type);
-        /* NOTREACHED */
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    if (sp->u.number == 0)
+                        ERROR("Division by zero\n");
+                    sp->u.number = (unsigned char)(*argp->u.charp %= sp->u.number);
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            default:
+                OP_ARG_ERROR(1, TF_FLOAT|TF_NUMBER, argp->type);
+                /* NOTREACHED */
+                break;
+            } /* switch() */
+
+            break;
+        } /* for() */
+        break;
     }
 
     CASE(F_AND_EQ);                 /* --- and_eq              --- */
@@ -12883,125 +12761,143 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)  /* Intersect a number */
+        for (;;)
         {
-            if (sp[-1].type != T_NUMBER)
+            switch (argp->type)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp[-1].type);
-                /* NOTREACHED */
-            }
-            sp--;
-            sp->u.number = argp->u.number &= sp->u.number;
-            break;
-        }
-
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            sp->u.number = (unsigned char)(*argp->u.charp &= sp->u.number);
-            break;
-        }
-
-        if (argp->type == T_POINTER)
-        {
-            /* Intersect an array */
-
-            if (sp[-1].type == T_POINTER)
-            {
-                vector_t *vec1, *vec2;
-
-                inter_sp = sp - 2;
-                vec1 = argp->u.vec;
-                vec2 = sp[-1].u.vec;
-                argp->type = T_NUMBER;
-                vec1 = intersect_array(vec1, vec2);
-                put_ref_array(argp, vec1);
+            case T_NUMBER:  /* Intersect a number */
+                if (sp[-1].type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp[-1].type);
+                    /* NOTREACHED */
+                }
                 sp--;
-                sp->u.vec = argp->u.vec;
-                free_svalue(sp+1);
-            }
-            else if (sp[-1].type == T_MAPPING)
-            {
-                vector_t *vec;
-                mapping_t * map;
+                sp->u.number = argp->u.number &= sp->u.number;
+                break;
 
-                inter_sp = sp - 2;
-                vec = argp->u.vec;
-                map = sp[-1].u.map;
-                argp->type = T_NUMBER;
-                vec = map_intersect_array(vec, map);
-                put_ref_array(argp, vec);
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_AND_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
+
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    sp->u.number = (unsigned char)(*argp->u.charp &= sp->u.number);
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            case T_POINTER:
+                /* Intersect an array */
+
+                if (sp[-1].type == T_POINTER)
+                {
+                    vector_t *vec1, *vec2;
+
+                    inter_sp = sp - 2;
+                    vec1 = argp->u.vec;
+                    vec2 = sp[-1].u.vec;
+                    argp->type = T_NUMBER;
+                    vec1 = intersect_array(vec1, vec2);
+                    put_ref_array(argp, vec1);
+                    sp--;
+                    sp->u.vec = argp->u.vec;
+                    free_svalue(sp+1);
+                }
+                else if (sp[-1].type == T_MAPPING)
+                {
+                    vector_t *vec;
+                    mapping_t * map;
+
+                    inter_sp = sp - 2;
+                    vec = argp->u.vec;
+                    map = sp[-1].u.map;
+                    argp->type = T_NUMBER;
+                    vec = map_intersect_array(vec, map);
+                    put_ref_array(argp, vec);
+                    sp--;
+                    put_array(sp, argp->u.vec);
+                    free_svalue(sp+1);
+                }
+                else
+                {
+                    OP_ARG_ERROR(2, TF_POINTER|TF_MAPPING, sp[-1].type);
+                    /* NOTREACHED */
+                }
+                break;
+
+            case T_MAPPING:
+              {
+                /* Intersect a mapping */
+
+                mapping_t *result;
+
+                if (sp[-1].type != T_POINTER && sp[-1].type != T_MAPPING)
+                {
+                    OP_ARG_ERROR(2, TF_MAPPING|TF_POINTER, sp[-1].type);
+                    /* NOTREACHED */
+                }
+
+                inter_sp = sp;
+
+                result = map_intersect(argp->u.map, sp-1);
+
+                put_mapping(argp, result);
+
+                free_svalue(sp);
                 sp--;
-                put_array(sp, argp->u.vec);
-                free_svalue(sp+1);
-            }
-            else
-            {
-                OP_ARG_ERROR(2, TF_POINTER|TF_MAPPING, sp[-1].type);
+
+                put_ref_mapping(sp, result);
+                break;
+              }
+
+            case T_STRING:
+              {
+                string_t * result;
+
+                if (sp[-1].type != T_STRING)
+                {
+                    OP_ARG_ERROR(2, TF_STRING, sp[-1].type);
+                    /* NOTREACHED */
+                }
+                inter_sp = sp;
+                result = intersect_strings(argp->u.str, (sp-1)->u.str, MY_FALSE);
+                free_string_svalue(argp);
+                put_string(argp, result);
+                free_svalue(sp);
+                sp--;
+                free_string_svalue(sp);
+                put_ref_string(sp, result);
+                break;
+              }
+
+            default:
+                OP_ARG_ERROR(1, TF_NUMBER|TF_STRING|TF_POINTER, argp->type);
                 /* NOTREACHED */
-            }
+                break;
+            } /* switch() */
+
             break;
-        }
-
-        if (argp->type == T_MAPPING)
-        {
-            /* Intersect a mapping */
-
-            mapping_t *result;
-
-            if (sp[-1].type != T_POINTER && sp[-1].type != T_MAPPING)
-            {
-                OP_ARG_ERROR(2, TF_MAPPING|TF_POINTER, sp[-1].type);
-                /* NOTREACHED */
-            }
-
-            inter_sp = sp;
-
-            result = map_intersect(argp->u.map, sp-1);
-
-            put_mapping(argp, result);
-
-            free_svalue(sp);
-            sp--;
-
-            put_ref_mapping(sp, result);
-            break;
-        }
-
-        if (argp->type == T_STRING)
-        {
-            string_t * result;
-
-            if (sp[-1].type != T_STRING)
-            {
-                OP_ARG_ERROR(2, TF_STRING, sp[-1].type);
-                /* NOTREACHED */
-            }
-            inter_sp = sp;
-            result = intersect_strings(argp->u.str, (sp-1)->u.str, MY_FALSE);
-            free_string_svalue(argp);
-            put_string(argp, result);
-            free_svalue(sp);
-            sp--;
-            free_string_svalue(sp);
-            put_ref_string(sp, result);
-            break;
-        }
-
-        OP_ARG_ERROR(1, TF_NUMBER|TF_STRING|TF_POINTER, argp->type);
-        /* NOTREACHED */
+        } /* for() */
         break;
     }
 
@@ -13022,63 +12918,83 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type != T_NUMBER)
+            switch (argp->type)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+            case T_NUMBER:
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                sp->u.number = argp->u.number |= sp->u.number;
+                break;
+
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_OR_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
+
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    sp->u.number = (unsigned char)(*argp->u.charp |= sp->u.number);
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            case T_POINTER:
+              {
+                /* Join an array */
+
+                vector_t *vec1, *vec2;
+
+                if (sp[-1].type != T_POINTER)
+                {
+                    OP_ARG_ERROR(2, TF_POINTER, sp[-1].type);
+                    /* NOTREACHED */
+                }
+                inter_sp = sp;
+                inter_pc = pc;
+                vec1 = argp->u.vec;
+                vec2 = sp[-1].u.vec;
+                vec1 = join_array(vec1, vec2);
+                  /* The new vec1 may be one of the original vec1 or vec2 */
+                put_ref_array(argp, vec1);
+                sp--;
+                sp->u.vec = argp->u.vec;
+                free_svalue(sp+1);
+                break;
+              }
+
+            default:
+                OP_ARG_ERROR(1, TF_NUMBER|TF_POINTER, argp->type);
                 /* NOTREACHED */
-            }
-            sp->u.number = argp->u.number |= sp->u.number;
+                break;
+            } /* switch() */
+
             break;
-        }
-
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            sp->u.number = (unsigned char)(*argp->u.charp |= sp->u.number);
-            break;
-        }
-
-        if (argp->type == T_POINTER)
-        {
-            /* Join an array */
-
-            vector_t *vec1, *vec2;
-
-            if (sp[-1].type != T_POINTER)
-            {
-                OP_ARG_ERROR(2, TF_POINTER, sp[-1].type);
-                /* NOTREACHED */
-            }
-            inter_sp = sp;
-            inter_pc = pc;
-            vec1 = argp->u.vec;
-            vec2 = sp[-1].u.vec;
-            vec1 = join_array(vec1, vec2);
-              /* The new vec1 may be one of the original vec1 or vec2 */
-            put_ref_array(argp, vec1);
-            sp--;
-            sp->u.vec = argp->u.vec;
-            free_svalue(sp+1);
-            break;
-        }
-
-        OP_ARG_ERROR(1, TF_NUMBER|TF_POINTER, argp->type);
-        /* NOTREACHED */
+        } /* for() */
         break;
     }
 
@@ -13101,62 +13017,82 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type != T_NUMBER)
+            switch (argp->type)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+            case T_NUMBER:
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                sp->u.number = argp->u.number ^= sp->u.number;
+                break;
+
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_XOR_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
+
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    sp->u.number = (unsigned char)(*argp->u.charp ^= sp->u.number);
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            case T_POINTER:
+              {
+                /* Symm-diff an array */
+
+                vector_t *vec1, *vec2;
+
+                if (sp[-1].type != T_POINTER)
+                {
+                    OP_ARG_ERROR(2, TF_POINTER, sp[-1].type);
+                    /* NOTREACHED */
+                }
+                inter_sp = sp - 2;
+                vec1 = argp->u.vec;
+                vec2 = sp[-1].u.vec;
+                argp->type = T_NUMBER;
+                vec1 = symmetric_diff_array(vec1, vec2);
+                put_ref_array(argp, vec1);
+                sp--;
+                sp->u.vec = argp->u.vec;
+                free_svalue(sp+1);
+                break;
+              }
+
+            default:
+                OP_ARG_ERROR(1, TF_NUMBER|TF_POINTER, argp->type);
                 /* NOTREACHED */
-            }
-            sp->u.number = argp->u.number ^= sp->u.number;
+                break;
+            } /* switch() */
+
             break;
-        }
-
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            sp->u.number = (unsigned char)(*argp->u.charp ^= sp->u.number);
-            break;
-        }
-
-        if (argp->type == T_POINTER)
-        {
-            /* Symm-diff an array */
-
-            vector_t *vec1, *vec2;
-
-            if (sp[-1].type != T_POINTER)
-            {
-                OP_ARG_ERROR(2, TF_POINTER, sp[-1].type);
-                /* NOTREACHED */
-            }
-            inter_sp = sp - 2;
-            vec1 = argp->u.vec;
-            vec2 = sp[-1].u.vec;
-            argp->type = T_NUMBER;
-            vec1 = symmetric_diff_array(vec1, vec2);
-            put_ref_array(argp, vec1);
-            sp--;
-            sp->u.vec = argp->u.vec;
-            free_svalue(sp+1);
-            break;
-        }
-
-        OP_ARG_ERROR(1, TF_NUMBER|TF_POINTER, argp->type);
-        /* NOTREACHED */
+        } /* for() */
         break;
     }
 
@@ -13179,43 +13115,63 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type != T_NUMBER)
+            switch (argp->type)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            i = sp->u.number;
-            argp->u.number <<= (uint)i > MAX_SHIFT ? (int)MAX_SHIFT : i;
-            sp->u.number = argp->u.number;
-            break;
-        }
+            case T_NUMBER:
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                i = sp->u.number;
+                argp->u.number <<= (uint)i > MAX_SHIFT ? (int)MAX_SHIFT : i;
+                sp->u.number = argp->u.number;
+                break;
 
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
-            {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            i = sp->u.number;
-            *argp->u.charp <<= (uint)i > MAX_SHIFT ? (int)MAX_SHIFT : i;
-            sp->u.number = (unsigned char)(*argp->u.charp);
-            break;
-        }
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_LSH_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
 
-        OP_ARG_ERROR(1, TF_NUMBER, argp->type);
-        /* NOTREACHED */
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    i = sp->u.number;
+                    *argp->u.charp <<= (uint)i > MAX_SHIFT ? (int)MAX_SHIFT : i;
+                    sp->u.number = (unsigned char)(*argp->u.charp);
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            default:
+                OP_ARG_ERROR(1, TF_NUMBER, argp->type);
+                /* NOTREACHED */
+                break;
+            } /* switch() */
+
+            break;
+        } /* for() */
         break;
     }
 
@@ -13236,43 +13192,65 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type != T_NUMBER)
+            switch (argp->type)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            i = sp->u.number;
-            argp->u.number >>= (uint)i > MAX_SHIFT ? (int)(MAX_SHIFT+1) : i;
-            sp->u.number = argp->u.number;
-            break;
-        }
-
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
+            if (argp->type == T_NUMBER)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                i = sp->u.number;
+                argp->u.number >>= (uint)i > MAX_SHIFT ? (int)(MAX_SHIFT+1) : i;
+                sp->u.number = argp->u.number;
+                break;
             }
-            i = sp->u.number;
-            *argp->u.charp >>= (uint)i > MAX_SHIFT ? (int)MAX_SHIFT : i;
-            sp->u.number = (unsigned char)(*argp->u.charp);
-            break;
-        }
 
-        OP_ARG_ERROR(1, TF_NUMBER, argp->type);
-        /* NOTREACHED */ break;
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_RSH_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
+
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    i = sp->u.number;
+                    *argp->u.charp >>= (uint)i > MAX_SHIFT ? (int)MAX_SHIFT : i;
+                    sp->u.number = (unsigned char)(*argp->u.charp);
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            default:
+                OP_ARG_ERROR(1, TF_NUMBER, argp->type);
+                /* NOTREACHED */ break;
+            } /* switch() */
+
+            break;
+        } /* for() */
+        break;
     }
 
     CASE(F_RSHL_EQ);               /* --- rshl_eq              --- */
@@ -13291,49 +13269,71 @@ again:
 #endif
 
         /* Set argp to the actual value designated by sp[0] */
-        for ( argp = sp->u.lvalue
-            ; (T_LVALUE == argp->type && argp->x.lvalue_type == LVALUE_UNPROTECTED)
-            || T_PROTECTED_LVALUE == argp->type
-            ; argp = argp->u.lvalue)
-            NOOP;
+        argp = sp;
 
         /* Now do it */
-        if (argp->type == T_NUMBER)
+        for (;;)
         {
-            sp--;
-            if (sp->type != T_NUMBER)
+            switch (argp->type)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
-            }
-            i = sp->u.number;
-            if ((uint)i > MAX_SHIFT)
-                argp->u.number = 0;
-            else
-                argp->u.number = (p_uint)argp->u.number >> i;
-            sp->u.number = argp->u.number;
-            break;
-        }
-
-        if (argp->type == T_CHAR_LVALUE)
-        {
-            sp--;
-            if (sp->type != T_NUMBER)
+            if (argp->type == T_NUMBER)
             {
-                OP_ARG_ERROR(2, TF_NUMBER, sp->type);
-                /* NOTREACHED */
+                sp--;
+                if (sp->type != T_NUMBER)
+                {
+                    OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                    /* NOTREACHED */
+                }
+                i = sp->u.number;
+                if ((uint)i > MAX_SHIFT)
+                    argp->u.number = 0;
+                else
+                    argp->u.number = (p_uint)argp->u.number >> i;
+                sp->u.number = argp->u.number;
+                break;
             }
-            i = sp->u.number;
-            if ((uint)i > MAX_SHIFT)
-                *argp->u.charp = 0;
-            else
-                *argp->u.charp = (p_uint)*argp->u.charp >> i;
-            sp->u.number = (unsigned char)*argp->u.charp;
-            break;
-        }
 
-        OP_ARG_ERROR(1, TF_NUMBER, argp->type);
-        /* NOTREACHED */
+            case T_LVALUE: /* Unravel lvalue. */
+                switch (argp->x.lvalue_type)
+                {
+                default:
+                    fatal("(F_RSHL_EQ) Illegal lvalue %p type %d\n", argp, argp->x.lvalue_type);
+                    /* NOTREACHED */
+                    break;
+
+                case LVALUE_UNPROTECTED:
+                    argp = argp->u.lvalue;
+                    continue;
+
+                case LVALUE_UNPROTECTED_CHAR:
+                    sp--;
+                    if (sp->type != T_NUMBER)
+                    {
+                        OP_ARG_ERROR(2, TF_NUMBER, sp->type);
+                        /* NOTREACHED */
+                    }
+                    i = sp->u.number;
+                    if ((uint)i > MAX_SHIFT)
+                        *argp->u.charp = 0;
+                    else
+                        *argp->u.charp = (p_uint)*argp->u.charp >> i;
+                    sp->u.number = (unsigned char)*argp->u.charp;
+                    break;
+                } /* switch() */
+                break;
+
+            case T_PROTECTED_LVALUE:
+                argp = argp->u.lvalue;
+                continue;
+
+            default:
+                OP_ARG_ERROR(1, TF_NUMBER, argp->type);
+                /* NOTREACHED */
+                break;
+            } /* switch() */
+
+            break;
+        } /* for() */
         break;
     }
 

@@ -1,6 +1,9 @@
 This file lists all changes made to the game driver in all glory detail.
 See the file HISTORY for a user-oriented summary of all the changes.
 
+25-Jun-2009 (Gnomi)
+  - Migrated T_CHAR_LVALUE into T_LVALUE/LVALUE_UNPROTECTED_CHAR.
+
 18-Jun-2009 (Gnomi)
   - Branched from 3.5 trunk to redesign the lvalue handling.
   - Added a subtype .lvalue_type for T_LVALUES and gave all current

@@ -615,6 +615,19 @@ svalue_to_string ( fmt_state_t *st
             stradd(st, &str, compact ? "l:" : "lvalue: ");
             str = svalue_to_string(st, obj->u.lvalue, str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
             break;
+
+        case LVALUE_UNPROTECTED_CHAR:
+            stradd(st, &str, "'");
+            straddn(st, &str, obj->u.charp, 1);
+            stradd(st, &str, "'");
+            if (!compact)
+            {
+                stradd(st, &str, " (");
+                numadd(st, &str, (*obj->u.charp) & 0xff);
+                stradd(st, &str, ")");
+            }
+            break;
+
         }
         break;
 
@@ -974,24 +987,6 @@ svalue_to_string ( fmt_state_t *st
 
         break;
     } /* case T_CLOSURE */
-
-  case T_CHAR_LVALUE:
-    {
-        char buf[2];
-
-        buf[0] = *obj->u.charp;
-        buf[1] = '\0';
-        stradd(st, &str, "'");
-        stradd(st, &str, buf);
-        stradd(st, &str, "'");
-        if (!compact)
-        {
-            stradd(st, &str, " (");
-            numadd(st, &str, buf[0] & 0xff);
-            stradd(st, &str, ")");
-        }
-        break;
-    }
 
   case T_PROTECTED_CHAR_LVALUE:
     {
