@@ -646,25 +646,15 @@ static struct cache cache[CACHE_SIZE];
   /* The apply cache.
    */
 
-static struct
-  {
-    svalue_t v;
-      /* The target value:
-       *   .v.type: T_CHAR_LVALUE
-       *   .v.u.charp: the char to modify
-       * or
-       *   .v.type: T_{POINTER,STRING}_RANGE_LVALUE
-       *   .v.u.{vec,string}: the target value holding the range
-       *   .index1, .index2, .size: see below
-       */
-    mp_int index1;  /* First index of the range */
-    mp_int index2;  /* Last index of the range plus 1 */
-    mp_int size;    /* Current(?) size of the value */
-  }
-special_lvalue;
+  /* --- struct unprotected_range: a range in a string or vector */
+struct unprotected_range
+{
+    svalue_t *vec;            /* The string or vector containing the range. */
+    mp_int    index1, index2; /* first and last index of the range */
+} current_unprotected_range = /* Static buffer, because there is only */
+    { NULL, 0, 0 };   /* one unprotected lvalue at a time. */
   /* When assigning to vector and string ranges or elements, the
    * target information is stored in this structure.
-   * TODO: Having one global structure counts as 'ugly'.
    * Used knowingly by: (r)index_lvalue(), transfer_pointer_range(),
    *                    assign_string_range().
    * Used unknowingly by: assign_svalue(), transfer_svalue(),
@@ -1258,6 +1248,7 @@ int_free_svalue (svalue_t *v)
             break;
 
         case LVALUE_UNPROTECTED_CHAR:
+        case LVALUE_UNPROTECTED_RANGE:
             NOOP;
             break;
         }
@@ -1930,7 +1921,32 @@ assign_svalue (svalue_t *dest, svalue_t *v)
                     *dest->u.charp = (char)v->u.number;
                 return;
 
+            case LVALUE_UNPROTECTED_RANGE:
+                switch (current_unprotected_range.vec->type)
+                {
+                case T_POINTER:
+                    if (v->type == T_POINTER)
+                    {
+                        (void)ref_array(v->u.vec); /* transfer_...() will free it once */
+                        transfer_pointer_range(v);
+                    }
+                    return;
+
+                case T_STRING:
+                    assign_string_range(v, MY_FALSE);
+                    return;
+
+                default:
+                    fatal("(assign_svalue) Illegal type in protected range lvalue: %s, expected array or string.\n",
+                       typename(current_unprotected_range.vec->type));
+                    /* NOTREACHED */
+                    return;
+                } /* switch() */
+                /* NOTREACHED */
+                return;
             } /* switch() */
+
+            /* NOTREACHED */
             return;
 
         case T_PROTECTED_LVALUE:
@@ -2004,14 +2020,6 @@ assign_svalue (svalue_t *dest, svalue_t *v)
             return;
           }
 
-        case T_POINTER_RANGE_LVALUE:
-            if (v->type == T_POINTER)
-            {
-                (void)ref_array(v->u.vec); /* transfer_...() will free it once */
-                transfer_pointer_range(v);
-            }
-            return;
-
         case T_PROTECTED_POINTER_RANGE_LVALUE:
             if (v->type == T_POINTER)
             {
@@ -2020,10 +2028,6 @@ assign_svalue (svalue_t *dest, svalue_t *v)
                   (struct protected_range_lvalue *)dest, v
                 );
             }
-            return;
-
-        case T_STRING_RANGE_LVALUE:
-            assign_string_range(v, MY_FALSE);
             return;
 
         case T_PROTECTED_STRING_RANGE_LVALUE:
@@ -2147,6 +2151,25 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
                     free_svalue(v);
                 return;
 
+            case LVALUE_UNPROTECTED_RANGE:
+                switch (current_unprotected_range.vec->type)
+                {
+                case T_POINTER:
+                    transfer_pointer_range(v);
+                    return;
+
+                case T_STRING:
+                    assign_string_range(v, MY_TRUE);
+                    return;
+
+                default:
+                    fatal("(assign_svalue) Illegal type in protected range lvalue: %s, expected array or string.\n",
+                       typename(current_unprotected_range.vec->type));
+                    /* NOTREACHED */
+                    return;
+                } /* switch() */
+                /* NOTREACHED */
+                return;
             } /* switch() */
             return;
 
@@ -2177,18 +2200,10 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
             return;
           }
 
-        case T_POINTER_RANGE_LVALUE:
-            transfer_pointer_range(v);
-            return;
-
         case T_PROTECTED_POINTER_RANGE_LVALUE:
             transfer_protected_pointer_range(
               (struct protected_range_lvalue *)dest, v
             );
-            return;
-
-        case T_STRING_RANGE_LVALUE:
-            assign_string_range(v, MY_TRUE);
             return;
 
         case T_PROTECTED_STRING_RANGE_LVALUE:
@@ -2224,7 +2239,7 @@ static void
 transfer_pointer_range (svalue_t *source)
 
 /* Transfer the vector <source> to the vector range defined by
- * <special_lvalue>, modifying the target vector in special_lvalue
+ * <current_unprotected_range>, modifying the target vector therein
  * accordingly. <source> is freed once in the call.
  *
  * If <source> is not a vector, it is just freed.
@@ -2234,7 +2249,7 @@ transfer_pointer_range (svalue_t *source)
     if (source->type == T_POINTER)
     {
         vector_t *sv;      /* Source vector (from source) */
-        vector_t *dv;      /* Destination vector (from special_lvalue) */
+        vector_t *dv;      /* Destination vector (from current_unprotected_range) */
         vector_t *rv;      /* Result vector */
         mp_int dsize;           /* Size of destination vector */
         mp_int ssize;           /* Size of source vector */
@@ -2242,11 +2257,11 @@ transfer_pointer_range (svalue_t *source)
         mp_int i;
 
         /* Setup the variables */
-        dsize = special_lvalue.size;
-        index1 = special_lvalue.index1;
-        index2 = special_lvalue.index2;
-        dv = special_lvalue.v.u.lvalue->u.vec;
+        dv = current_unprotected_range.vec->u.vec;
         sv = source->u.vec;
+        index1 = current_unprotected_range.index1;
+        index2 = current_unprotected_range.index2;
+        dsize = (mp_int)VEC_SIZE(dv);
         ssize = (mp_int)VEC_SIZE(sv);
 
 #ifdef NO_NEGATIVE_RANGES
@@ -2303,7 +2318,7 @@ transfer_pointer_range (svalue_t *source)
             svalue_t *s, *d; /* Copy source and destination */
 
             rv = allocate_array(dsize + ssize + index1 - index2);
-            special_lvalue.v.u.lvalue->u.vec = rv;
+            current_unprotected_range.vec->u.vec = rv;
             s = dv->item;
             d = rv->item;
 
@@ -2450,7 +2465,7 @@ static void
 assign_string_range (svalue_t *source, Bool do_free)
 
 /* Transfer the string <source> to the string range defined by
- * <special_lvalue>, modifying the target string in special_lvalue
+ * <current_unprotected_range>, modifying the target string therein
  * accordingly. If <do_free> is TRUE, <source> is freed once in the call.
  *
  * If <source> is not a string, it is just freed resp. ignored.
@@ -2459,7 +2474,7 @@ assign_string_range (svalue_t *source, Bool do_free)
 {
     if (source->type == T_STRING)
     {
-        svalue_t *dsvp;     /* destination svalue (from special_lvalue) */
+        svalue_t *dsvp;     /* destination svalue (from current_unprotected_range) */
         string_t *ds;            /* destination string (from dsvp) */
         string_t *ss;            /* source string (from source) */
         string_t *rs;            /* result string */
@@ -2468,12 +2483,12 @@ assign_string_range (svalue_t *source, Bool do_free)
         mp_int index1, index2;   /* range indices */
 
         /* Set variables */
-        dsize = special_lvalue.size;
-        index1 = special_lvalue.index1;
-        index2 = special_lvalue.index2;
-        dsvp = special_lvalue.v.u.lvalue;
+        index1 = current_unprotected_range.index1;
+        index2 = current_unprotected_range.index2;
+        dsvp = current_unprotected_range.vec;
         ds = dsvp->u.str;
         ss = source->u.str;
+        dsize = (mp_int)mstrsize(ds);
         ssize = (mp_int)mstrsize(ss);
 
 #ifdef NO_NEGATIVE_RANGES
@@ -3070,15 +3085,15 @@ push_error_handler(void (*errorhandler)(error_handler_t *), error_handler_t *arg
  *
  * Some typical layouts:
  *
- *     (LVALUE) -> indexed svalue from vector/mapping
- *                 (might be copied into indexing_quickfix)
+ *     (LVALUE_UNPROTECTED) -> indexed svalue from vector/mapping
+ *                             (might be copied into indexing_quickfix)
  *
  *       by: push_(r)indexed_lvalue()
  *           (r)index_lvalue()
  *
  *
- *     (LVALUE) -> (CHAR_LVALUE)
- *                 special_lvalue.u.charp -> character in untabled string
+ *     (LVALUE_UNPROTECTED_CHAR)
+ *                 .u.charp -> character in untabled string
  *
  *       by: (r)index_lvalue() on string lvalues
  *
@@ -3101,11 +3116,10 @@ push_error_handler(void (*errorhandler)(error_handler_t *), error_handler_t *arg
  *       by: protected_(r)index_lvalue() on string lvalue
  *
  *
- *     (LVALUE) -> (T_{STRING,POINTER}_RANGE_LVALUE)
- *                   special_lvalue.v   -> indexed-on string/vector
- *                   special_lvalue.size:  size of the string/vector
- *                                 .ind1:  lower index
- *                                 .ind2:  upper index
+ *     (LVALUE_UNPROTEcTED_RANGE)
+ *                   current_unprotected_range.vec  -> indexed-on string/vector
+ *                   current_unprotected_range.index1: lower index
+ *                                            .index2: upper index
  *
  *       by: range_lvalue()
  *
@@ -3142,11 +3156,11 @@ push_error_handler(void (*errorhandler)(error_handler_t *), error_handler_t *arg
  *   push_protected_indexed_map_lvalue(mapping m, mixed i, int j)
  *     Return &(m[i:j]), protected.
  *   index_lvalue(vector|mapping|string & v, int|mixed i)
- *     Return &(*v[i]), unprotected, using special_lvalue.
+ *     Return &(*v[i]), unprotected, using current_unprotected_range.
  *   rindex_lvalue(vector|string & v, int i)
- *     Return &(*v[<i]), unprotected, using special_lvalue.
+ *     Return &(*v[<i]), unprotected, using current_unprotected_range.
  *   aindex_lvalue(vector|string & v, int i)
- *     Return &(*v[>i]), unprotected, using special_lvalue.
+ *     Return &(*v[>i]), unprotected, using current_unprotected_range.
  *   protected_index_lvalue(vector|mapping|string & v, int|mixed i)
  *     Return &(*v[i]), protected.
  *   protected_rindex_lvalue(vector|string & v, int i)
@@ -3154,7 +3168,7 @@ push_error_handler(void (*errorhandler)(error_handler_t *), error_handler_t *arg
  *   protected_aindex_lvalue(vector|string & v, int i)
  *     Return &(*v[>i]), protected.
  *   range_lvalue(vector|string & v, int i2, int i1)
- *     Return &(*v[i1..i2]), unprotected, using special_lvalue.
+ *     Return &(*v[i1..i2]), unprotected, using current_unprotected_range.
  *   protected_range_lvalue(vector|string & v, int i2, int i1)
  *     Return &(*v[i1..i2]), protected.
  *   push_indexed_value(string|vector|mapping|struct v, int|mixed i)
@@ -4326,8 +4340,7 @@ index_lvalue (svalue_t *sp, bytecode_p pc)
  * Compute the index &(v[i]) of lvalue <v> and push it into the stack. The
  * computed index is a lvalue itself.
  * If <v> is a string-lvalue, it is made a malloced string if necessary,
- * and the pushed result will be a lvalue pointing to a CHAR_LVALUE stored
- * in <special_lvalue>.
+ * and the pushed result will be a LVALUE_UNPROTECTED_CHAR.
  */
 
 {
@@ -4456,8 +4469,7 @@ rindex_lvalue (svalue_t *sp, bytecode_p pc)
  * Compute the index &(v[<i]) of lvalue <v> and push it into the stack. The
  * computed index is a lvalue itself.
  * If <v> is a string-lvalue, it is made a malloced string if necessary,
- * and the pushed result will be a lvalue pointing to a CHAR_LVALUE stored
- * in <special_lvalue>.
+ * and the pushed result will be a LVALUE_UNPROTECTED_CHAR.
  */
 
 {
@@ -4532,8 +4544,7 @@ aindex_lvalue (svalue_t *sp, bytecode_p pc)
  * Compute the index &(v[>i]) of lvalue <v> and push it into the stack. The
  * computed index is a lvalue itself.
  * If <v> is a string-lvalue, it is made a malloced string if necessary,
- * and the pushed result will be a lvalue pointing to a CHAR_LVALUE stored
- * in <special_lvalue>.
+ * and the pushed result will be a LVALUE_UNPROTECTED_CHAR.
  */
 
 {
@@ -5240,8 +5251,8 @@ range_lvalue (int code, svalue_t *sp)
  * and the operators F_*_RANGE_LVALUE.
  *
  * Compute the range &(v[i1..i2]) of lvalue <v> and push it into the stack.
- * The value pushed is a lvalue pointing to <special_lvalue>. <special_lvalue>
- * then is the POINTER_RANGE_- resp. STRING_RANGE_LVALUE.
+ * The value pushed is a LVALUE_UNPROTECTED_RANGE lvalue. The indices are
+ * then stored in <current_unprotected_range>.
  *
  * <code> is a four-bit flag determining whether the indexes are counted
  * from the beginning ('[i1..' and '..i2]'), the end of the vector
@@ -5278,16 +5289,14 @@ range_lvalue (int code, svalue_t *sp)
     } while ((vec->type == T_LVALUE && vec->x.lvalue_type == LVALUE_UNPROTECTED)
            || vec->type == T_PROTECTED_LVALUE);
 
-    /* Determine the type of the result, and the input's size.
+    /* Determine the input's size.
      */
     switch(vec->type)
     {
     case T_POINTER:
-        special_lvalue.v.type = T_POINTER_RANGE_LVALUE;
         size = (mp_int)VEC_SIZE(vec->u.vec);
         break;
     case T_STRING:
-        special_lvalue.v.type = T_STRING_RANGE_LVALUE;
         size = (mp_int)mstrsize(vec->u.str);
         break;
     default:
@@ -5390,19 +5399,18 @@ range_lvalue (int code, svalue_t *sp)
         return NULL;
     }
 
-    /* Finish the special_lvalue structure
+    /* Finish the current_unprotected_range structure
      */
-    special_lvalue.v.u.lvalue = vec;
-    special_lvalue.size = size;
-    special_lvalue.index1 = ind1;
-    special_lvalue.index2 = ind2;
+    current_unprotected_range.vec = vec;
+    current_unprotected_range.index1 = ind1;
+    current_unprotected_range.index2 = ind2;
 
     /* Drop the arguments and return the result. */
 
     sp = i;
-
-    assign_lvalue_no_free(sp, &special_lvalue.v);
-
+    sp->type = T_LVALUE;
+    sp->x.lvalue_type = LVALUE_UNPROTECTED_RANGE;
+    
     return sp;
 } /* range_lvalue() */
 
@@ -14189,8 +14197,7 @@ again:
          * Compute the index &(v[i]) of lvalue <v> and push it into the stack.
          * The computed index is a lvalue itself.  If <v> is a string-lvalue,
          * it is made a malloced string if necessary, and the pushed result
-         * will be a lvalue pointing to a CHAR_LVALUE stored in
-         * <special_lvalue>.
+         * will be a LVALUE_UNPROTECTED_CHAR.
          */
 
 #ifdef USE_STRUCTS
@@ -14219,8 +14226,7 @@ again:
          * Compute the index &(v[<i]) of lvalue <v> and push it into the
          * stack. The computed index is a lvalue itself.
          * If <v> is a string-lvalue, it is made a malloced string if
-         * necessary, and the pushed result will be a lvalue pointing to a
-         * CHAR_LVALUE stored in <special_lvalue>.
+         * necessary, and the pushed result will be a LVALUE_UNPROTECTED_CHAR.
          */
 
         sp = rindex_lvalue(sp, pc);
@@ -14232,8 +14238,7 @@ again:
          * Compute the index &(v[>i]) of lvalue <v> and push it into the
          * stack. The computed index is a lvalue itself.
          * If <v> is a string-lvalue, it is made a malloced string if
-         * necessary, and the pushed result will be a lvalue pointing to a
-         * CHAR_LVALUE stored in <special_lvalue>.
+         * necessary, and the pushed result will be a LVALUE_UNPROTECTED_CHAR.
          */
 
         sp = aindex_lvalue(sp, pc);
@@ -14307,9 +14312,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[i1..i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          *
          * TODO: Four different instructions for this? A single instruction plus
          * TODO:: argument would be as well.
@@ -14324,9 +14328,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[i1..<i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14338,9 +14341,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[<i1..i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14352,9 +14354,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[<i1..<i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14366,9 +14367,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[i1..>i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14380,9 +14380,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[>i1..i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14394,9 +14393,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[<i1..>i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14408,9 +14406,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[>i1..<i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14422,9 +14419,8 @@ again:
          *                         , int i2=sp[-1], i1=sp[-2])
          *
          * Compute the range &(v[>i1..>i2]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          */
 
         inter_pc = pc;
@@ -14436,9 +14432,8 @@ again:
          *                            , int i1=sp[-1])
          *
          * Compute the range &(v[i1..]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          *
          * We implement this by pushing '1' onto the stack and then
          * call F_NR_RANGE_LVALUE, effectively computing &(v[i1..<1]).
@@ -14456,9 +14451,8 @@ again:
          *                            , int i1=sp[-1])
          *
          * Compute the range &(v[<i1..]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          *
          * We implement this by pushing '1' onto the stack and then
          * call F_RR_RANGE_LVALUE, effectively computing &(v[<i1..<1]).
@@ -14476,9 +14470,8 @@ again:
          *                            , int i1=sp[-1])
          *
          * Compute the range &(v[>i1..]) of lvalue <v> and push it into the
-         * stack.  The value pushed is a lvalue pointing to <special_lvalue>.
-         * <special_lvalue> then is the POINTER_RANGE_- resp.
-         * STRING_RANGE_LVALUE.
+         * stack.  The value pushed is a LVALUE_UNPROTECTED_RANGE using
+         * <current_unprotected_range>.
          *
          * We implement this by pushing '1' onto the stack and then
          * call F_AR_RANGE_LVALUE, effectively computing &(v[>i1..<1]).

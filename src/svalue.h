@@ -93,9 +93,6 @@ union u {
     struct protected_char_lvalue *protected_char_lvalue;
     struct protected_range_lvalue *protected_range_lvalue;
 
-      /* The following fields are used only in svalues referenced by
-       * T_LVALUE svalues:
-       */
     error_handler_t *error_handler;
       /* T_ERROR_HANDLER: the function error_handler->fun is
        * executed on a free_svalue(), receiving the error_handler_t*
@@ -190,8 +187,6 @@ struct svalue_s
   /* The following types must be used only in svalues referenced
    * by a T_LVALUE svalue.
    */
-#define T_STRING_RANGE_LVALUE             0x0d /* TODO: ??? */
-#define T_POINTER_RANGE_LVALUE            0x0e /* TODO: ??? */
 #define T_PROTECTED_CHAR_LVALUE           0x0f
   /* A protected character lvalue */
 #define T_PROTECTED_STRING_RANGE_LVALUE   0x10
@@ -310,10 +305,14 @@ struct svalue_s
 
 /* T_LVALUE secondary information. */
 
-#define LVALUE_UNPROTECTED      0x00
-#define LVALUE_UNPROTECTED_CHAR 0x0c
-  /* .u.charp points to the referenced character in a string */
-
+#define LVALUE_UNPROTECTED                  0x00
+  /* .u.lvalue points to the referenced svalue. */
+#define LVALUE_UNPROTECTED_CHAR             0x01
+  /* .u.charp points to the referenced character in a string. */
+#define LVALUE_UNPROTECTED_RANGE            0x02
+  /* Doesn't have a value. The vector and indices are stored in
+   * <current_unprotected_range>.
+   */
 
 /* --- The primary types in bit-flag encoding ---
  *

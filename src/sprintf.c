@@ -611,21 +611,12 @@ svalue_to_string ( fmt_state_t *st
             /* NOTREACHED */
             break;
 
+        /* TODO: There shouldn't be any unprotected lvalues here.
+         * TODO:: Remove them after the reorganisation is finished.
+         */
         case LVALUE_UNPROTECTED:
             stradd(st, &str, compact ? "l:" : "lvalue: ");
             str = svalue_to_string(st, obj->u.lvalue, str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
-            break;
-
-        case LVALUE_UNPROTECTED_CHAR:
-            stradd(st, &str, "'");
-            straddn(st, &str, obj->u.charp, 1);
-            stradd(st, &str, "'");
-            if (!compact)
-            {
-                stradd(st, &str, " (");
-                numadd(st, &str, (*obj->u.charp) & 0xff);
-                stradd(st, &str, ")");
-            }
             break;
 
         }
@@ -995,7 +986,6 @@ svalue_to_string ( fmt_state_t *st
         break;
     }
 
-  case T_STRING_RANGE_LVALUE:
   case T_PROTECTED_STRING_RANGE_LVALUE:
     {
         if (obj->type == T_PROTECTED_STRING_RANGE_LVALUE)
@@ -1006,7 +996,6 @@ svalue_to_string ( fmt_state_t *st
         break;
     }
 
-  case T_POINTER_RANGE_LVALUE:
   case T_PROTECTED_POINTER_RANGE_LVALUE:
     {
         size_t size;
