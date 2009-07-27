@@ -31,9 +31,7 @@ union u {
        *   the range.
        */
     char     *charp;
-      /* LVALUE_UNPROTECTED_CHAR, T_PROTECTED_CHAR_LVALUE:
-       *           pointer to the referenced character
-       *           (referenced from a T_LVALUE).
+      /* LVALUE_UNPROTECTED_CHAR: pointer to the referenced character.
        */
     p_int number;
       /* T_NUMBER: the number.
@@ -89,8 +87,6 @@ union u {
        * by assigning one of the following aliases:
        */
     struct protected_lvalue *protected_lvalue;
-
-
     struct protected_char_lvalue *protected_char_lvalue;
     struct protected_range_lvalue *protected_range_lvalue;
 
@@ -188,8 +184,6 @@ struct svalue_s
   /* The following types must be used only in svalues referenced
    * by a T_LVALUE svalue.
    */
-#define T_PROTECTED_CHAR_LVALUE           0x0f
-  /* A protected character lvalue */
 #define T_PROTECTED_STRING_RANGE_LVALUE   0x10
   /* A protected string range lvalue */
 #define T_PROTECTED_POINTER_RANGE_LVALUE  0x11
@@ -313,6 +307,8 @@ struct svalue_s
    */
 #define LVALUE_PROTECTED                    0x10
   /* u.protected_lvalue points to the reference counted svalue. */
+#define LVALUE_PROTECTED_CHAR               0x11
+  /* .u.protected_char_lvalue contains the referenced string and index. */
 
 /* --- The primary types in bit-flag encoding ---
  *

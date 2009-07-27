@@ -3650,8 +3650,7 @@ setup_callback_args (callback_t *cb, int nargs, svalue_t * args
             {
                 /* Check if we are allowed to handle the lvalues. */
                 Bool isProtected
-                  = (   args->u.lvalue->type == T_PROTECTED_CHAR_LVALUE
-                     || args->u.lvalue->type == T_PROTECTED_STRING_RANGE_LVALUE
+                  = (   args->u.lvalue->type == T_PROTECTED_STRING_RANGE_LVALUE
                      || args->u.lvalue->type == T_PROTECTED_POINTER_RANGE_LVALUE
                     );
 

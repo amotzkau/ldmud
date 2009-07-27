@@ -97,8 +97,8 @@ struct error_handler_s {
  * If the stack is unrolled during runtime errors the error_handler function
  * is called and frees buff. */
 typedef struct mem_error_handler_s {
-  error_handler_t head;      /* The T_ERROR_HANDLER structure */
-  char          * buff;      /* The allocated buffer to free. */
+    error_handler_t head;      /* The T_ERROR_HANDLER structure */
+    char          * buff;      /* The allocated buffer to free. */
 } mem_error_handler_t;
 
 /* --- struct protected_lvalue: protect a single value
@@ -111,8 +111,20 @@ typedef struct mem_error_handler_s {
  */
 struct protected_lvalue
 {
-   p_int    ref; /* Number of references */
-   svalue_t val; /* The svalue. */
+    p_int    ref; /* Number of references */
+    svalue_t val; /* The svalue. */
+};
+
+/* --- struct protected_char_lvalue: protect an lvalue to a single
+ * character in a string. We'll save a counted reference to the string
+ * and also make the variable holding the string a protected lvalue,
+ * so we are able to update variable.
+ */
+struct protected_char_lvalue
+{
+    p_int     ref;   /* Number of references to this structure. */
+    string_t *str;   /* The string that is indexed. */
+    char     *charp; /* The indexed character. */
 };
 
 /* --- Constants --- */

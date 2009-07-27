@@ -7,8 +7,8 @@ mixed *tests = ({
     ({ "Unprotected local 1", 0,  (: int a; a = 10; return a == 10; :) }),
     ({ "Unprotected local 2", 0,  (: int a; a += 10; return a == 10; :) }),
     ({ "Unprotected char 1", 0, (: string str="xyz"; str[2]='x'; return str=="xyx"; :) }),
-    ({ "Unprotected range 1", 0, (: zlpc mixed a = ({1})*10; a[2..6]   = ({2})*10; return deep_eq(a, ({1})+({2})*5+({1})*4); :) }),
-    ({ "Unprotected range 2", 0, (: zlpc mixed a = ({1})*10; a[2..6] &&= ({2})*10; return deep_eq(a, ({1})+({2})*5+({1})*4); :) }),
+    ({ "Unprotected range 1", 0, (: mixed a = ({1})*10; a[2..6]   = ({2})*5; return deep_eq(a, ({1})*2+({2})*5+({1})*3); :) }),
+    ({ "Unprotected range 2", 0, (: mixed a = ({1})*10; a[2..6] &&= ({2})*5; return deep_eq(a, ({1})*2+({2})*5+({1})*3); :) }),
     ({ "Empty mapping entries (#148)", 0, (: mapping m=([:1]); catch(m[1][2]=3); return !sizeof(m); :) }),
     /* TODO: What should the proper results be? */
     ({ "Vanishing destinations 1", TF_ERROR, (: mixed a = ({1}); a[0] = (a=0); :) }),
@@ -26,8 +26,10 @@ mixed *tests = ({
     }),
     ({ "Vanishing destinations 5", TF_DONTCHECKERROR, (: mixed a = ([]); a["abc"] ||= (a=0); :) }),
     ({ "Vanishing destinations 6", TF_DONTCHECKERROR, (: string str = "abcd"; str[0] &&= (str=0); :) }),
-    ({ "Vanishing destinations 7", TF_DONTCHECKERROR, (: zlpc mixed a = ({1})*10; a[2..6] &&= ((a=0), ({2})*10); :) }),
-    ({ "Protected char 1", 0,
+    ({ "Vanishing destinations 7", TF_DONTCHECKERROR, (: mixed a = ({1})*10; a[2..6] &&= ((a=0), ({2})*10); :) }),
+    ({ "Protected char 1", 0, (: string str = "xyz"; mixed c = 0 || &(str[1]); c = 'a'; return str == "xaz"; :) }),
+    ({ "Protected char 2", 0, (: string str = "xyz"; mixed c1 = 0 || &(str[0]), c2 = 0 || &(str[1]); c1 = 'a'; c2 = 'b';return str == "abz"; :) }),
+    ({ "Protected char 3", 0,
         (:
             string str1,str2;
             mixed c;
@@ -41,7 +43,7 @@ mixed *tests = ({
             return str2 != str1;
          :)
     }),
-    ({ "Protected char 2", 0,
+    ({ "Protected char 4", 0,
         (:
             mapping m = ([:1]);
             string str;

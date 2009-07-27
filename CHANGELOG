@@ -3,6 +3,7 @@ See the file HISTORY for a user-oriented summary of all the changes.
 
 27-Jul-2009 (Gnomi)
   - Migrated T_PROTECTED_LVALUE to LVALUE_PROTECTED.
+  - Migrated T_PROTECTED_CHAR_LVALUE into LVALUE_PROTECTED_CHAR.
 
 26-Jun-2009 (Gnomi)
   - Migrated T_STRING_RANGE_LVALUE and T_POINTER_RANGE_LVALUE

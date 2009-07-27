@@ -624,6 +624,11 @@ svalue_to_string ( fmt_state_t *st
             stradd(st, &str, compact ? "p l:" : "prot lvalue: ");
             str = svalue_to_string(st, &(obj->u.protected_lvalue->val), str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
             break;
+
+        case LVALUE_PROTECTED_CHAR:
+            stradd(st, &str, compact ? "p char:" : "prot char: ");
+            numadd(st, &str, (unsigned char)*obj->u.protected_char_lvalue->charp);
+            break;
         }
         break;
 
@@ -983,13 +988,6 @@ svalue_to_string ( fmt_state_t *st
 
         break;
     } /* case T_CLOSURE */
-
-  case T_PROTECTED_CHAR_LVALUE:
-    {
-        stradd(st, &str, compact ? "p char:" : "prot char: ");
-        str = svalue_to_string(st, obj->u.lvalue, str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
-        break;
-    }
 
   case T_PROTECTED_STRING_RANGE_LVALUE:
     {

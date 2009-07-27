@@ -952,22 +952,6 @@ is_sto_context (void)
  * TODO:: would still be a potential problem.
  */
 
-/* --- struct protected_char_lvalue: protect a char in a string
- */
-struct protected_char_lvalue
-{
-    svalue_t v;
-      /* .v.type: T_PROTECTED_CHAR_LVALUE
-       * .v.u.charp: points to the char to access
-       */
-    svalue_t protector; /* protects .lvalue */
-    svalue_t *lvalue;   /* the string containing the char */
-    char *start;
-      /* must be == get_txt(lvalue->u.str), otherwise the string has been
-       * changed and this lvalue is invalid
-       */
-};
-
 /* --- struct protected_range_lvalue: protect a range in a string or vector
  */
 struct protected_range_lvalue {
@@ -1174,20 +1158,6 @@ int_free_svalue (svalue_t *v)
         case LVALUE_UNPROTECTED:
             switch (v->u.lvalue->type)
             {
-            case T_PROTECTED_CHAR_LVALUE:
-              {
-                  struct protected_char_lvalue *p;
-
-                  p = v->u.protected_char_lvalue;
-                  if (p->lvalue->type == T_STRING)
-                  {
-                      free_mstring(p->lvalue->u.str);
-                  }
-                  free_protector_svalue(&p->protector);
-                  xfree(p);
-                  break;
-              }
-
             case T_PROTECTED_STRING_RANGE_LVALUE:
               {
                   struct protected_range_lvalue *p;
@@ -1233,6 +1203,16 @@ int_free_svalue (svalue_t *v)
                 break;
            }
 
+        case LVALUE_PROTECTED_CHAR:
+            if (--(v->u.protected_char_lvalue->ref) <= 0)
+            {
+                struct protected_char_lvalue *p;
+
+                p = v->u.protected_char_lvalue;
+                free_mstring(p->str);
+                xfree(p);
+                break;
+            }
         }
         break; /* case T_LVALUE */
 
@@ -1553,6 +1533,10 @@ inl_assign_svalue_no_free (svalue_t *to, svalue_t *from)
             to->u.protected_lvalue->ref++;
             break;
 
+        case LVALUE_PROTECTED_CHAR:
+            to->u.protected_char_lvalue->ref++;
+            break;
+
         } /* switch */
         break;
     }
@@ -1702,6 +1686,10 @@ assign_checked_svalue_no_free (svalue_t *to, svalue_t *from)
             from->u.protected_lvalue->ref++;
             break;
 
+        case LVALUE_PROTECTED_CHAR:
+            from->u.protected_char_lvalue->ref++;
+            break;
+
         } /* switch */
         break;
     }
@@ -1787,12 +1775,12 @@ assign_from_lvalue:
             }
             goto assign_from_lvalue;
 
+        case LVALUE_PROTECTED_CHAR:
+            put_number(to, (unsigned char) *from->u.protected_char_lvalue->charp);
+            return;
+
         } /* switch */
         break;
-
-    case T_PROTECTED_CHAR_LVALUE:
-        put_number(to, *from->u.charp);
-        return;
 
     }
     *to = *from;
@@ -1887,6 +1875,10 @@ void assign_lrvalue_no_free (svalue_t *to, svalue_t *from)
             to->u.protected_lvalue->ref++;
             break;
 
+        case LVALUE_PROTECTED_CHAR:
+            to->u.protected_char_lvalue->ref++;
+            break;
+
         } /* switch */
         break;
     }
@@ -1976,6 +1968,10 @@ assign_svalue (svalue_t *dest, svalue_t *v)
                 dest = &(dest->u.protected_lvalue->val);
                 continue;
 
+            case LVALUE_PROTECTED_CHAR:
+                if (v->type == T_NUMBER)
+                    *dest->u.protected_char_lvalue->charp = (char)v->u.number;
+                return;
             } /* switch() */
 
             /* NOTREACHED */
@@ -2033,20 +2029,6 @@ assign_svalue (svalue_t *dest, svalue_t *v)
          * the assignment is done right here and now.
          * Note that 'dest' in some cases points to a protector structure.
          */
-
-        case T_PROTECTED_CHAR_LVALUE:
-          {
-            struct protected_char_lvalue *p;
-
-            p = (struct protected_char_lvalue *)dest;
-            if (p->lvalue->type == T_STRING
-             && get_txt(p->lvalue->u.str) == p->start)
-            {
-                if (v->type == T_NUMBER)
-                    *p->v.u.charp = (char)v->u.number;
-            }
-            return;
-          }
 
         case T_PROTECTED_POINTER_RANGE_LVALUE:
             if (v->type == T_POINTER)
@@ -2203,6 +2185,13 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
                 dest = &(dest->u.protected_lvalue->val);
                 continue;
 
+            case LVALUE_PROTECTED_CHAR:
+                if (v->type == T_NUMBER)
+                    *dest->u.protected_char_lvalue->charp = (char)v->u.number;
+                else
+                    free_svalue(v);
+                return;
+
             } /* switch() */
             return;
 
@@ -2210,24 +2199,6 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
          * the assignment is done right here and now.
          * Note that 'dest' in some cases points to a protector structure.
          */
-
-        case T_PROTECTED_CHAR_LVALUE:
-          {
-            struct protected_char_lvalue *p;
-
-            p = (struct protected_char_lvalue *)dest;
-            if (p->lvalue->type == T_STRING
-             && get_txt(p->lvalue->u.str) == p->start)
-            {
-                if (v->type == T_NUMBER)
-                {
-                    *p->v.u.charp = (char)v->u.number;
-                    return;
-                }
-            }
-            free_svalue(v);
-            return;
-          }
 
         case T_PROTECTED_POINTER_RANGE_LVALUE:
             transfer_protected_pointer_range(
@@ -2740,23 +2711,21 @@ add_number_to_lvalue (char* op, svalue_t *dest, int i, svalue_t *pre, svalue_t *
                 dest = &(dest->u.protected_lvalue->val);
                 continue;
 
+            case LVALUE_PROTECTED_CHAR:
+              {
+                unsigned char* charp;
+
+                charp = (unsigned char*)dest->u.protected_char_lvalue->charp;
+
+                if (pre) put_number(pre, *charp);
+                i = (unsigned char)(*charp += i);
+                if (post) put_number(post, i);
+
+                break;
+              }
             } /* switch() */
             break;
 
-        case T_PROTECTED_CHAR_LVALUE:
-          {
-            struct protected_char_lvalue *p;
-
-            p = (struct protected_char_lvalue *)dest;
-            if (p->lvalue->type == T_STRING
-             && get_txt(p->lvalue->u.str) == p->start)
-            {
-                if (pre) put_number(pre, (unsigned char)*(p->v.u.charp));
-                i = (unsigned char)(*(p->v.u.charp) += i);
-                if (post) put_number(post, i);
-            }
-            break;
-          }
         } /* switch() */
 
         break;
@@ -3850,13 +3819,18 @@ assign_protected_lvalue_no_free (svalue_t *dest, svalue_t *src)
 
             case LVALUE_UNPROTECTED_CHAR:
             case LVALUE_UNPROTECTED_RANGE:
-                /* TODO: Make them protected. 
-                 * TODO:: Keywords T_PROTECTED_CHAR_LVALUE, T_PROTECTED_STRING_RANGE_LVALUE */
+                /* TODO: Make them protected.
+                 * TODO:: Currently there is not enough information to do that. */
                 fatal("TODO: assign_protected_lvalue on unprotected lvalues.\n");
                 return;
 
             case LVALUE_PROTECTED:
                 src->u.protected_lvalue->ref++;
+                *dest = *src;
+                break;
+
+            case LVALUE_PROTECTED_CHAR:
+                src->u.protected_char_lvalue->ref++;
                 *dest = *src;
                 break;
             }
@@ -3878,6 +3852,28 @@ assign_protected_lvalue_no_free (svalue_t *dest, svalue_t *src)
         dest->u.protected_lvalue = src->u.protected_lvalue = lval;
     }
 } /* assign_lvalue_no_free() */
+
+/*-------------------------------------------------------------------------*/
+static INLINE void
+assign_protected_char_lvalue_no_free (svalue_t *dest, string_t *src, char *charp)
+
+/* Put an unprotected char lvalue to <cp> into <dest>.
+ * <dest> is considered empty at the time of call.
+ */
+{
+    struct protected_char_lvalue *lval;
+
+    memsafe(lval = xalloc(sizeof(*lval)), sizeof(*lval)
+           , "protected char lvalue");
+
+    lval->ref = 1;
+    lval->str = ref_mstring(src);
+    lval->charp = charp;
+
+    dest->type = T_LVALUE;
+    dest->x.lvalue_type = LVALUE_PROTECTED_CHAR;
+    dest->u.protected_char_lvalue = lval;
+} /* assign_char_lvalue_no_free() */
 
 /*-------------------------------------------------------------------------*/
 static INLINE svalue_t *
@@ -4756,31 +4752,17 @@ protected_index_lvalue (svalue_t *sp, bytecode_p pc)
          */
         case T_STRING:
           {
-            struct protected_char_lvalue *val;
             char * cp;
 
             cp = get_string_item(vec, i, /* make_singular: */ MY_TRUE
                                 , /* allow_one_past: */ MY_FALSE
                                 , sp, pc);
 
-            /* Add another reference to the string to keep it alive while
-             * we use it.
-             */
-            (void)ref_mstring(vec->u.str);
-
             /* Drop the arguments */
             sp = i;
 
             /* Compute and return the result */
-
-            val = (struct protected_char_lvalue *)xalloc(sizeof *val);
-            val->v.type = T_PROTECTED_CHAR_LVALUE;
-            val->v.u.charp = cp;
-            val->lvalue = vec;
-            val->start = get_txt(vec->u.str);
-            val->protector.type = T_INVALID;
-
-            assign_lvalue_no_free(sp, &val->v);
+            assign_protected_char_lvalue_no_free(sp, vec->u.str, cp);
 
             return sp;
           }
@@ -4912,30 +4894,17 @@ protected_rindex_lvalue (svalue_t *sp, bytecode_p pc)
          */
         case T_STRING:
           {
-            struct protected_char_lvalue *val;
             char * cp;
 
             cp = get_string_r_item(vec, i, /* make_singular: */ MY_TRUE
                                   , /* allow_one_past: */ MY_FALSE
                                   , sp, pc);
 
-            /* Add another reference to the string to keep it alive while
-             * we use it.
-             */
-            (void)ref_mstring(vec->u.str);
-
-            /* Build the protector */
-            val = (struct protected_char_lvalue *)xalloc(sizeof *val);
-            val->v.type = T_PROTECTED_CHAR_LVALUE;
-            val->v.u.charp = cp;
-            val->lvalue = vec;
-            val->start = get_txt(vec->u.str);
-            val->protector.type = T_INVALID;
-
-            /* Drop the arguments and return the result */
+            /* Drop the arguments */
             sp = i;
 
-            assign_lvalue_no_free(sp, &val->v);
+            /* Compute and return the result */
+            assign_protected_char_lvalue_no_free(sp, vec->u.str, cp);
 
             return sp;
           }
@@ -5033,30 +5002,17 @@ protected_aindex_lvalue (svalue_t *sp, bytecode_p pc)
          */
         case T_STRING:
           {
-            struct protected_char_lvalue *val;
             char * cp;
 
             cp = get_string_a_item(vec, i, /* make_singular: */ MY_TRUE
                                   , /* allow_one_past: */ MY_FALSE
                                   , sp, pc);
 
-            /* Add another reference to the string to keep it alive while
-             * we use it.
-             */
-            (void)ref_mstring(vec->u.str);
-
-            /* Build the protector */
-            val = (struct protected_char_lvalue *)xalloc(sizeof *val);
-            val->v.type = T_PROTECTED_CHAR_LVALUE;
-            val->v.u.charp = cp;
-            val->lvalue = vec;
-            val->start = get_txt(vec->u.str);
-            val->protector.type = T_INVALID;
-
-            /* Drop the arguments and return the result */
+            /* Drop the arguments */
             sp = i;
 
-            assign_lvalue_no_free(sp, &val->v);
+            /* Compute and return the result */
+            assign_protected_char_lvalue_no_free(sp, vec->u.str, cp);
 
             return sp;
           }
@@ -15737,19 +15693,9 @@ again:
                 else
                 {
                     svalue_t * str = sp-2;
-                    struct protected_char_lvalue *val;
 
                     /* Compute and return the result */
-
-                    (void)ref_mstring(str->u.str);
-                    val = (struct protected_char_lvalue *)xalloc(sizeof *val);
-                    val->v.type = T_PROTECTED_CHAR_LVALUE;
-                    val->v.u.charp = &(get_txt(str->u.str)[ix]);
-                    val->lvalue = str;
-                    val->start = get_txt(str->u.str);
-                    val->protector.type = T_INVALID;
-
-                    assign_lvalue_no_free(lvalue, &val->v);
+                    assign_protected_char_lvalue_no_free(lvalue, str->u.str, &(get_txt(str->u.str)[ix]));
                 }
             }
             else if (sp[-2].type == T_POINTER)
