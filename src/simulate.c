@@ -3646,14 +3646,13 @@ setup_callback_args (callback_t *cb, int nargs, svalue_t * args
         {
             Bool dontHandle = MY_FALSE;
 
-            if (args->type == T_LVALUE)
+            if (args->type == T_LVALUE && args->x.lvalue_type == LVALUE_UNPROTECTED)
             {
                 /* Check if we are allowed to handle the lvalues. */
                 Bool isProtected
                   = (   args->u.lvalue->type == T_PROTECTED_CHAR_LVALUE
                      || args->u.lvalue->type == T_PROTECTED_STRING_RANGE_LVALUE
                      || args->u.lvalue->type == T_PROTECTED_POINTER_RANGE_LVALUE
-                     || args->u.lvalue->type == T_PROTECTED_LVALUE
                     );
 
                 dontHandle =    ( delayed_callback && !isProtected)

@@ -6510,9 +6510,20 @@ query_ip_name (svalue_t *sp, Bool lookup)
         if (sp->type == T_NUMBER && !sp->u.number)
             return sp;
         svp = sp;
-        while ((svp->type == T_LVALUE &&  svp->x.lvalue_type == LVALUE_UNPROTECTED)
-             || svp->type == T_PROTECTED_LVALUE)
-            svp = svp->u.lvalue;
+        while (svp->type == T_LVALUE)
+        {
+            switch (svp->x.lvalue_type)
+            {
+            case LVALUE_UNPROTECTED:
+                svp = svp->u.lvalue;
+                continue;
+
+            case LVALUE_PROTECTED:
+                svp = &(svp->u.protected_lvalue->val);
+                continue;
+            }
+            break;
+        }
         if (svp->type != T_OBJECT)
         {
             errorf("Bad arg 1 to query_ip_number(): expected object/object&, got %s&.\n"

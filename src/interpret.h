@@ -101,6 +101,19 @@ typedef struct mem_error_handler_s {
   char          * buff;      /* The allocated buffer to free. */
 } mem_error_handler_t;
 
+/* --- struct protected_lvalue: protect a single value
+ * On creation the original svalue as taken out of its place
+ * (a variable, array or whatever) and put in this structure.
+ * A T_LVALUE/LVALUE_PROTECTED pointing to this structure will
+ * then be stored into the original place. This is done to have the
+ * lifetime of the lvalue not be bound by the lifetime of the variable,
+ * array or whatever.
+ */
+struct protected_lvalue
+{
+   p_int    ref; /* Number of references */
+   svalue_t val; /* The svalue. */
+};
 
 /* --- Constants --- */
 
@@ -164,6 +177,7 @@ extern void transfer_svalue_no_free(svalue_t *dest, svalue_t *v);
 extern void transfer_svalue(svalue_t *dest, svalue_t *v);
 extern void assign_lvalue_no_free(svalue_t *dest, svalue_t *src);
 extern void assign_char_lvalue_no_free(svalue_t *dest, char *cp);
+extern void assign_protected_lvalue_no_free (svalue_t *dest, svalue_t *src);
 
 extern void put_c_string (svalue_t *sp, const char *p);
 extern void put_c_n_string (svalue_t *sp, const char *p, size_t len);

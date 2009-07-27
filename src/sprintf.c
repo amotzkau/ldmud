@@ -619,6 +619,11 @@ svalue_to_string ( fmt_state_t *st
             str = svalue_to_string(st, obj->u.lvalue, str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
             break;
 
+
+        case LVALUE_PROTECTED:
+            stradd(st, &str, compact ? "p l:" : "prot lvalue: ");
+            str = svalue_to_string(st, &(obj->u.protected_lvalue->val), str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
+            break;
         }
         break;
 
@@ -1052,11 +1057,6 @@ svalue_to_string ( fmt_state_t *st
         }
         break;
     }
-
-  case T_PROTECTED_LVALUE:
-      stradd(st, &str, compact ? "p l:" : "prot lvalue: ");
-      str = svalue_to_string(st, obj->u.lvalue, str, indent+2, trailing, quoteStrings, compact, MY_FALSE);
-      break;
 
   default:
       stradd(st, &str, "!ERROR: GARBAGE SVALUE (");

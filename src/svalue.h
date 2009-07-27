@@ -55,7 +55,6 @@ union u {
 #endif
     mapping_t *map;
       /* T_MAPPING: pointer to the mapping structure.
-       * T_PROTECTOR_MAPPING: TODO: ???
        */
     lambda_t *lambda;
       /* T_CLOSURE: allocated closures: the closure structure.
@@ -90,6 +89,8 @@ union u {
        * by assigning one of the following aliases:
        */
     struct protected_lvalue *protected_lvalue;
+
+
     struct protected_char_lvalue *protected_char_lvalue;
     struct protected_range_lvalue *protected_range_lvalue;
 
@@ -193,9 +194,6 @@ struct svalue_s
   /* A protected string range lvalue */
 #define T_PROTECTED_POINTER_RANGE_LVALUE  0x11
   /* A protected pointer/mapping range lvalue */
-#define T_PROTECTED_LVALUE                0x12
-  /* A protected lvalue */
-#define T_PROTECTOR_MAPPING               0x13 /* TODO: ??? */
 
 #define T_CALLBACK                        0x14
   /* A callback structure referenced from the stack to allow
@@ -313,6 +311,8 @@ struct svalue_s
   /* Doesn't have a value. The vector and indices are stored in
    * <current_unprotected_range>.
    */
+#define LVALUE_PROTECTED                    0x10
+  /* u.protected_lvalue points to the reference counted svalue. */
 
 /* --- The primary types in bit-flag encoding ---
  *
