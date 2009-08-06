@@ -629,7 +629,81 @@ svalue_to_string ( fmt_state_t *st
             stradd(st, &str, compact ? "p char:" : "prot char: ");
             numadd(st, &str, (unsigned char)*obj->u.protected_char_lvalue->charp);
             break;
-        }
+
+        case LVALUE_PROTECTED_RANGE:
+          {
+            struct protected_range_lvalue *r;
+
+            r = obj->u.protected_range_lvalue;
+
+            stradd(st, &str, compact ? "p:" : "prot: ");
+            switch(r->vec.type)
+            {
+            default:
+                stradd(st, &str, "ILLEGAL");
+                break;
+            case T_STRING:
+                stradd(st, &str, "\"");
+                stradd(st, &str, get_txt(r->vec.u.str));
+                stradd(st, &str, "\"");
+                break;
+            case T_POINTER:
+              {
+                size_t size;
+
+                size = VEC_SIZE(r->vec.u.vec);
+                if (!size)
+                {
+                    stradd(st, &str, compact ? "({})" : "({ })");
+                }
+                else
+                {
+                    struct pointer_record *prec;
+
+                    prec = find_add_pointer(st->ptable, r->vec.u.vec, MY_TRUE);
+                    if (!prec->id_number)
+                    {
+                        /* New array */
+                        prec->id_number = st->pointer_id++;
+
+                        if (compact)
+                        {
+                            stradd(st, &str, "({#");
+                            numadd(st, &str, prec->id_number);
+                            stradd(st, &str, " ");
+                        }
+                        else
+                        {
+                            stradd(st, &str, "({ /* #");
+                            numadd(st, &str, prec->id_number);
+                            stradd(st, &str, ", size: ");
+                            numadd(st, &str, size);
+                            stradd(st, &str, " */\n");
+                        }
+                        for (i = 0; (size_t)i < size-1; i++)
+                            str = svalue_to_string(st, &(r->vec.u.vec->item[i]), str, indent+2, MY_TRUE, quoteStrings, compact, MY_FALSE);
+                        str = svalue_to_string(st, &(r->vec.u.vec->item[i]), str, indent+2, MY_FALSE, quoteStrings, compact, MY_FALSE);
+                        if (!compact)
+                        {
+                            stradd(st, &str, "\n");
+                            add_indent(st, &str, indent);
+                        }
+                        stradd(st, &str, "})");
+                    }
+                    else
+                    {
+                        /* Recursion! */
+                        stradd(st, &str, compact ? "({#" : "({ #");
+                        numadd(st, &str, prec->id_number);
+                        stradd(st, &str, compact ? "})" : " })");
+                    }
+                }
+                break;
+              } /* case T_POINTER */
+            } /* switch(r->vec.type) */
+            break;
+          } /* case LVALUE_PROTECTED_RANGE */
+        } /* switch(obj->x.lvalue_type) */
         break;
 
     case T_NUMBER:
@@ -988,73 +1062,6 @@ svalue_to_string ( fmt_state_t *st
 
         break;
     } /* case T_CLOSURE */
-
-  case T_PROTECTED_STRING_RANGE_LVALUE:
-    {
-        if (obj->type == T_PROTECTED_STRING_RANGE_LVALUE)
-            stradd(st, &str, compact ? "p:" : "prot: ");
-        stradd(st, &str, "\"");
-        stradd(st, &str, get_txt(obj->u.str));
-        stradd(st, &str, "\"");
-        break;
-    }
-
-  case T_PROTECTED_POINTER_RANGE_LVALUE:
-    {
-        size_t size;
-
-        if (obj->type == T_PROTECTED_POINTER_RANGE_LVALUE)
-            stradd(st, &str, compact ? "p:" : "prot: ");
-
-        size = VEC_SIZE(obj->u.vec);
-        if (!size)
-        {
-            stradd(st, &str, compact ? "({})" : "({ })");
-        }
-        else
-        {
-            struct pointer_record *prec;
-
-            prec = find_add_pointer(st->ptable, obj->u.vec, MY_TRUE);
-            if (!prec->id_number)
-            {
-                /* New array */
-                prec->id_number = st->pointer_id++;
-
-                if (compact)
-                {
-                    stradd(st, &str, "({#");
-                    numadd(st, &str, prec->id_number);
-                    stradd(st, &str, " ");
-                }
-                else
-                {
-                    stradd(st, &str, "({ /* #");
-                    numadd(st, &str, prec->id_number);
-                    stradd(st, &str, ", size: ");
-                    numadd(st, &str, size);
-                    stradd(st, &str, " */\n");
-                }
-                for (i = 0; (size_t)i < size-1; i++)
-                    str = svalue_to_string(st, &(obj->u.vec->item[i]), str, indent+2, MY_TRUE, quoteStrings, compact, MY_FALSE);
-                str = svalue_to_string(st, &(obj->u.vec->item[i]), str, indent+2, MY_FALSE, quoteStrings, compact, MY_FALSE);
-                if (!compact)
-                {
-                    stradd(st, &str, "\n");
-                    add_indent(st, &str, indent);
-                }
-                stradd(st, &str, "})");
-            }
-            else
-            {
-                /* Recursion! */
-                stradd(st, &str, compact ? "({#" : "({ #");
-                numadd(st, &str, prec->id_number);
-                stradd(st, &str, compact ? "})" : " })");
-            }
-        }
-        break;
-    }
 
   default:
       stradd(st, &str, "!ERROR: GARBAGE SVALUE (");

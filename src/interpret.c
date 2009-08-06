@@ -463,20 +463,12 @@ static const char * svalue_typename[]
    , /* T_FLOAT   */  "float"
    , /* T_CLOSURE */  "closure"
    , /* T_SYMBOL  */  "symbol"
-   , /* T_QUOTED_ARRAY */  "quoted-array"
-   , /* T_STRUCT */  "struct"
-   , /* T_CHAR_LVALUE */           "char-lvalue"
-   , /* T_STRING_RANGE_LVALUE */   "string-range-lvalue"
-   , /* T_POINTER_RANGE_LVALUE */  "array-range-lvalue"
-   , /* T_PROTECTED_CHAR_LVALUE */           "prot-char-lvalue"
-   , /* T_PROTECTED_STRING_RANGE_LVALUE */   "prot-string-range-lvalue"
-   , /* T_PROTECTED_POINTER_RANGE_LVALUE */  "prot-array-range-lvalue"
-   , /* T_PROTECTED_LVALUE  */               "prot-lvalue"
-   , /* T_PROTECTOR_MAPPING  */              "protector-mapping"
-   , /* T_CALLBACK */       "callback-mapping"
+   , /* T_QUOTED_ARRAY */   "quoted-array"
+   , /* T_STRUCT */         "struct"
+   , /* T_CALLBACK */       "callback"
    , /* T_ERROR_HANDLER */  "error-handler"
    , /* T_BREAK_ADDR */     "break-address"
-   , /* T_NULL */  "null"
+   , /* T_NULL */           "null"
    };
 
 /*-------------------------------------------------------------------------*/
@@ -930,47 +922,6 @@ is_sto_context (void)
  */
 
 /*-------------------------------------------------------------------------*/
-
-/* --- Protector structures ---
- *
- * Whenever an assignment is made to a single value, or to a range in
- * a string, vector or mapping, the interpreter generates protector
- * structures in place of the usual LVALUE-svalues, which hold:
- *  - a svalue structure referring to the svalue into which the assignment
- *    is done (this structure is always first so that the protector
- *    structures can be used instead of normal svalues),
- *  - the necessary information to store the assigned svalue into its
- *    place in the target holding the value,
- *  - a protective reference to the holding value.
- *
- * All this just to keep LPC statements like 'a = ({ 1 }); a[0] = (a = 0);'
- * from crashing.
- *
- * TODO: A simpler way would be to compute the lhs of an assignment
- * TODO:: after evaluating the rhs - not vice versa as it is now.
- * TODO:: However, passing lvalues and ranges as ref-parameters to functions
- * TODO:: would still be a potential problem.
- */
-
-/* --- struct protected_range_lvalue: protect a range in a string or vector
- */
-struct protected_range_lvalue {
-    svalue_t v;
-      /* .v.type: T_PROTECTED_{POINTER,STRING}_RANGE_LVALUE
-       * .v.u.{str,vec}: the target value holding the range
-       */
-    svalue_t protector;  /* protects .lvalue */
-    svalue_t *lvalue;    /* the original svalue holding the range */
-    int index1, index2;  /* first and last index of the range in .lvalue */
-    int size;            /* original size of .lvalue */
-
-    /* On creation, .v.u.{vec,str} == .lvalue->u.{vec,str}.
-     * If that condition no longer holds, the target in .v has been changed
-     * and the range information (index, size) is no longer valid.
-     */
-};
-
-/*-------------------------------------------------------------------------*/
 /* Forward declarations */
 
 static void transfer_pointer_range(svalue_t *source);
@@ -1156,40 +1107,6 @@ int_free_svalue (svalue_t *v)
             break;
 
         case LVALUE_UNPROTECTED:
-            switch (v->u.lvalue->type)
-            {
-            case T_PROTECTED_STRING_RANGE_LVALUE:
-              {
-                  struct protected_range_lvalue *p;
-
-                  /* TODO: Are these checks necessary? See RANGE_LVALUE below */
-                  p = v->u.protected_range_lvalue;
-                  if (p->lvalue->type != T_STRING
-                   || get_txt(p->lvalue->u.str) == get_txt(p->v.u.str))
-                  {
-                      free_mstring(p->v.u.str);
-                  }
-                  if (p->lvalue->type == T_STRING)
-                      free_mstring(p->lvalue->u.str);
-                  free_protector_svalue(&p->protector);
-                  xfree(p);
-                  break;
-              }
-
-            case T_PROTECTED_POINTER_RANGE_LVALUE:
-              {
-                  struct protected_range_lvalue *p;
-
-                  p = v->u.protected_range_lvalue;
-                  free_array(p->v.u.vec);
-                  free_protector_svalue(&p->protector);
-                  xfree(p);
-                  break;
-              }
-
-            } /* switch (v->u.lvalue->type) */
-            break;
-
         case LVALUE_UNPROTECTED_CHAR:
         case LVALUE_UNPROTECTED_RANGE:
             NOOP;
@@ -1200,8 +1117,8 @@ int_free_svalue (svalue_t *v)
             {
                 free_svalue(&(v->u.protected_lvalue->val));
                 xfree(v->u.protected_lvalue);
-                break;
-           }
+            }
+            break;
 
         case LVALUE_PROTECTED_CHAR:
             if (--(v->u.protected_char_lvalue->ref) <= 0)
@@ -1211,8 +1128,19 @@ int_free_svalue (svalue_t *v)
                 p = v->u.protected_char_lvalue;
                 free_mstring(p->str);
                 xfree(p);
-                break;
             }
+            break;
+
+        case LVALUE_PROTECTED_RANGE:
+            if (--(v->u.protected_range_lvalue->ref) <= 0)
+            {
+                struct protected_range_lvalue *r;
+                r = v->u.protected_range_lvalue;
+                free_svalue(&(r->var));
+                free_svalue(&(r->vec));
+                xfree(r);
+            }
+            break;
         }
         break; /* case T_LVALUE */
 
@@ -1264,6 +1192,19 @@ free_svalue (svalue_t *v)
 
     case T_MAPPING:
         needs_deserializing = (v->u.map->ref == 1);
+        break;
+
+    case T_LVALUE:
+        switch (v->x.lvalue_type)
+        {
+        case LVALUE_PROTECTED:
+            needs_deserializing = (v->u.protected_lvalue->ref == 1);
+            break;
+
+        case LVALUE_PROTECTED_RANGE:
+            needs_deserializing = (v->u.protected_range_lvalue->ref == 1);
+            break;
+        }
         break;
     }
 
@@ -1537,6 +1478,10 @@ inl_assign_svalue_no_free (svalue_t *to, svalue_t *from)
             to->u.protected_char_lvalue->ref++;
             break;
 
+        case LVALUE_PROTECTED_RANGE:
+            to->u.protected_range_lvalue->ref++;
+            break;
+
         } /* switch */
         break;
     }
@@ -1688,6 +1633,10 @@ assign_checked_svalue_no_free (svalue_t *to, svalue_t *from)
 
         case LVALUE_PROTECTED_CHAR:
             from->u.protected_char_lvalue->ref++;
+            break;
+
+        case LVALUE_PROTECTED_RANGE:
+            from->u.protected_range_lvalue->ref++;
             break;
 
         } /* switch */
@@ -1879,6 +1828,10 @@ void assign_lrvalue_no_free (svalue_t *to, svalue_t *from)
             to->u.protected_char_lvalue->ref++;
             break;
 
+        case LVALUE_PROTECTED_RANGE:
+            to->u.protected_range_lvalue->ref++;
+            break;
+
         } /* switch */
         break;
     }
@@ -1972,6 +1925,36 @@ assign_svalue (svalue_t *dest, svalue_t *v)
                 if (v->type == T_NUMBER)
                     *dest->u.protected_char_lvalue->charp = (char)v->u.number;
                 return;
+
+            case LVALUE_PROTECTED_RANGE:
+              {
+                struct protected_range_lvalue *r;
+
+                r = dest->u.protected_range_lvalue;
+
+                switch(r->vec.type)
+                {
+                    case T_POINTER:
+                        if (v->type == T_POINTER)
+                        {
+                            (void)ref_array(v->u.vec); /* transfer_...() will free it once */
+                            transfer_protected_pointer_range(r, v);
+                        }
+                        /* TODO: Else throw an error? */
+                        return;
+
+                    case T_STRING:
+                        assign_protected_string_range(r, v, MY_FALSE);
+                        return;
+
+                    default:
+                        fatal("(assign_svalue) Illegal range %p type %d\n", r, r->vec.type);
+                        /* NOTREACHED */
+                        break;
+                }
+                /* NOTREACHED */
+                break;
+              }
             } /* switch() */
 
             /* NOTREACHED */
@@ -2024,27 +2007,6 @@ assign_svalue (svalue_t *dest, svalue_t *v)
         case T_CLOSURE:
             free_closure(dest);
             break;
-
-        /* If the final svalue in dest is one of these lvalues,
-         * the assignment is done right here and now.
-         * Note that 'dest' in some cases points to a protector structure.
-         */
-
-        case T_PROTECTED_POINTER_RANGE_LVALUE:
-            if (v->type == T_POINTER)
-            {
-                (void)ref_array(v->u.vec); /* transfer_...() will free it once */
-                transfer_protected_pointer_range(
-                  (struct protected_range_lvalue *)dest, v
-                );
-            }
-            return;
-
-        case T_PROTECTED_STRING_RANGE_LVALUE:
-            assign_protected_string_range(
-                  (struct protected_range_lvalue *)dest, v, MY_FALSE
-            );
-            return;
 
         } /* switch() */
 
@@ -2143,6 +2105,9 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
             break;
 
         case T_LVALUE:
+            /* If the final svalue in dest is one of these lvalues,
+             * the assignment is done right here and now.
+             */
             switch(dest->x.lvalue_type)
             {
             default:
@@ -2192,26 +2157,35 @@ inl_transfer_svalue (svalue_t *dest, svalue_t *v)
                     free_svalue(v);
                 return;
 
+            case LVALUE_PROTECTED_RANGE:
+              {
+                struct protected_range_lvalue *r;
+
+                r = dest->u.protected_range_lvalue;
+
+                switch(r->vec.type)
+                {
+                    case T_POINTER:
+                        if (v->type == T_POINTER)
+                            transfer_protected_pointer_range(r, v);
+                        /* TODO: Else throw an error? */
+                        return;
+
+                    case T_STRING:
+                        assign_protected_string_range(r, v, MY_TRUE);
+                        return;
+
+                    default:
+                        fatal("(transfer_svalue) Illegal range %p type %d\n", r, r->vec.type);
+                        /* NOTREACHED */
+                        break;
+                }
+                /* NOTREACHED */
+                break;
+              }
             } /* switch() */
             return;
-
-        /* If the final svalue in dest is one of these lvalues,
-         * the assignment is done right here and now.
-         * Note that 'dest' in some cases points to a protector structure.
-         */
-
-        case T_PROTECTED_POINTER_RANGE_LVALUE:
-            transfer_protected_pointer_range(
-              (struct protected_range_lvalue *)dest, v
-            );
-            return;
-
-        case T_PROTECTED_STRING_RANGE_LVALUE:
-            assign_protected_string_range(
-              (struct protected_range_lvalue *)dest, v, MY_TRUE
-            );
-            return;
-        } /* end switch */
+        }
 
         /* No more lvalues to follow, old value freed: do the assign next */
         break;
@@ -2362,7 +2336,7 @@ transfer_protected_pointer_range ( struct protected_range_lvalue *dest
  */
 
 {
-    if (source->type == T_POINTER && dest->v.u.vec == dest->lvalue->u.vec)
+    if (source->type == T_POINTER)
     {
         vector_t *sv;      /* Source vector (from source) */
         vector_t *dv;      /* Dest vector (from dest) */
@@ -2373,11 +2347,11 @@ transfer_protected_pointer_range ( struct protected_range_lvalue *dest
         mp_int i;
 
         /* Setup the variables */
-        dsize = dest->size;
+        dv = dest->vec.u.vec;
+        sv = source->u.vec;
         index1 = dest->index1;
         index2 = dest->index2;
-        dv = dest->v.u.vec;
-        sv = source->u.vec;
+        dsize = (mp_int)VEC_SIZE(dv);
         ssize = (mp_int)VEC_SIZE(sv);
 
 #ifdef NO_NEGATIVE_RANGES
@@ -2425,7 +2399,6 @@ transfer_protected_pointer_range ( struct protected_range_lvalue *dest
             svalue_t *s, *d;  /* Copy source and destination */
 
             rv = allocate_array(dsize + ssize + index1 - index2);
-            dest->lvalue->u.vec = rv;
 
             s = dv->item;
             d = rv->item;
@@ -2447,6 +2420,18 @@ transfer_protected_pointer_range ( struct protected_range_lvalue *dest
                 assign_svalue_no_free(d++, s++);
             }
 
+            dest->vec.u.vec = rv;
+            if (dest->var.type == T_LVALUE
+             && dest->var.x.lvalue_type == LVALUE_PROTECTED
+             && dest->var.u.protected_lvalue->val.type == T_POINTER
+             && dest->var.u.protected_lvalue->val.u.vec == dv)
+            {
+                /* The variable still points to
+                 * the vector, so update it.
+                 */
+               dest->var.u.protected_lvalue->val.u.vec = ref_array(rv);
+               free_array(dv);
+            }
             free_array(dv); /* this can make the lvalue invalid to use */
         }
     }
@@ -2549,7 +2534,6 @@ assign_protected_string_range ( struct protected_range_lvalue *dest
 {
     if (source->type == T_STRING)
     {
-        svalue_t *dsvp;     /* destination value (from dest) */
         string_t *ds;            /* destination string (from dsvp) */
         string_t *ss;            /* source string (from source) */
         string_t *rs;            /* result string */
@@ -2558,11 +2542,12 @@ assign_protected_string_range ( struct protected_range_lvalue *dest
         mp_int index1, index2;   /* range indices */
 
         /* Set variables */
-        dsize = dest->size;
         index1 = dest->index1;
         index2 = dest->index2;
-        dsvp = dest->lvalue;
-        ds = dest->v.u.str;
+        ds = dest->vec.u.str;
+        ss = source->u.str;
+        dsize = (mp_int)mstrsize(ds);
+        ssize = (mp_int)mstrsize(ss);
 
 #ifdef NO_NEGATIVE_RANGES
         if (index1 > index2)
@@ -2571,21 +2556,7 @@ assign_protected_string_range ( struct protected_range_lvalue *dest
                  );
 #endif /* NO_NEGATIVE_RANGES */
 
-        /* If the lvalue is no longer valid, free it */
-        if (dsvp->u.str != ds)
-        {
-            if (do_free)
-            {
-                free_svalue(source);
-                free_mstring(dest->v.u.str);
-                xfree(dest);
-            }
-            return;
-        }
-
         /* Create a new string */
-        ss = source->u.str;
-        ssize = (mp_int)mstrsize(ss);
         rs = alloc_mstring((size_t)(dsize + ssize + index1 - index2));
         if (!rs)
         {
@@ -2593,32 +2564,35 @@ assign_protected_string_range ( struct protected_range_lvalue *dest
         }
 
         if (index1)
-            memcpy(rs, ds, (size_t)index1);
+            memcpy(get_txt(rs), get_txt(ds), (size_t)index1);
         if (ssize)
-            memcpy(rs + index1, ss, (size_t)ssize);
+            memcpy(get_txt(rs) + index1, get_txt(ss), (size_t)ssize);
         dest->index2 = (int)(index1 + ssize);
         if (dsize > index2)
             memcpy( get_txt(rs) + dest->index2, get_txt(ds) + index2
                   , (size_t)(dsize - index2));
-        xfree(ds);
 
-        dest->v.u.str = dsvp->u.str = rs;
-        if (do_free)
+        /* Update the original variable. */
+        if (dest->var.type == T_LVALUE
+         && dest->var.x.lvalue_type == LVALUE_PROTECTED
+         && dest->var.u.protected_lvalue->val.type == T_STRING
+         && dest->var.u.protected_lvalue->val.u.str == ds)
         {
-            free_string_svalue(source);
-            free_protector_svalue(&dest->protector);
-            xfree(dest);
+            free_mstring(ds);
+            dest->var.u.protected_lvalue->val.u.str = ref_mstring(rs);
         }
+
+        free_mstring(ds);
+        dest->vec.u.str = rs;
+
+        if (do_free)
+            free_string_svalue(source);
     }
     else
     {
         /* Not a string: just free it */
         if (do_free)
-        {
             free_svalue(source);
-            free_protector_svalue(&dest->protector);
-            xfree(dest);
-        }
     }
 } /* transfer_protected_string_range() */
 
@@ -3798,8 +3772,9 @@ assign_char_lvalue_no_free (svalue_t *dest, char *cp)
 INLINE void
 assign_protected_lvalue_no_free (svalue_t *dest, svalue_t *src)
 
-/* Put an protected lvalue to <src> into <dest>.
+/* Put a protected lvalue to <src> into <dest>.
  * <dest> is considered empty at the time of call.
+ * <src> is not allowed to be an unprotected lvalue.
  */
 {
     if (src->type == T_LVALUE)
@@ -3813,17 +3788,6 @@ assign_protected_lvalue_no_free (svalue_t *dest, svalue_t *src)
                 /* NOTREACHED */
                 break;
 
-            case LVALUE_UNPROTECTED:
-                src = src->u.lvalue;
-                continue;
-
-            case LVALUE_UNPROTECTED_CHAR:
-            case LVALUE_UNPROTECTED_RANGE:
-                /* TODO: Make them protected.
-                 * TODO:: Currently there is not enough information to do that. */
-                fatal("TODO: assign_protected_lvalue on unprotected lvalues.\n");
-                return;
-
             case LVALUE_PROTECTED:
                 src->u.protected_lvalue->ref++;
                 *dest = *src;
@@ -3831,6 +3795,11 @@ assign_protected_lvalue_no_free (svalue_t *dest, svalue_t *src)
 
             case LVALUE_PROTECTED_CHAR:
                 src->u.protected_char_lvalue->ref++;
+                *dest = *src;
+                break;
+
+            case LVALUE_PROTECTED_RANGE:
+                src->u.protected_range_lvalue->ref++;
                 *dest = *src;
                 break;
             }
@@ -3857,7 +3826,7 @@ assign_protected_lvalue_no_free (svalue_t *dest, svalue_t *src)
 static INLINE void
 assign_protected_char_lvalue_no_free (svalue_t *dest, string_t *src, char *charp)
 
-/* Put an unprotected char lvalue to <cp> into <dest>.
+/* Put a protected char lvalue to <cp> into <dest>.
  * <dest> is considered empty at the time of call.
  */
 {
@@ -3873,6 +3842,32 @@ assign_protected_char_lvalue_no_free (svalue_t *dest, string_t *src, char *charp
     dest->type = T_LVALUE;
     dest->x.lvalue_type = LVALUE_PROTECTED_CHAR;
     dest->u.protected_char_lvalue = lval;
+} /* assign_char_lvalue_no_free() */
+
+/*-------------------------------------------------------------------------*/
+static INLINE void
+assign_protected_range_lvalue_no_free (svalue_t *dest, svalue_t *var, svalue_t *vec, mp_int index1, mp_int index2)
+
+/* Put a protected range lvalue to <src>[index1..index2-1] into <dest>.
+ * <dest> is considered empty at the time of call.
+ */
+{
+    struct protected_range_lvalue *lval;
+
+    memsafe(lval = xalloc(sizeof(*lval)), sizeof(*lval)
+           , "protected range lvalue");
+
+    lval->ref = 1;
+    lval->index1 = index1;
+    lval->index2 = index2;
+    /* Save the vector first. */
+    assign_svalue_no_free(&(lval->vec), vec);
+    /* Might modify <vec> as well, when <vec> == <var>. */
+    assign_protected_lvalue_no_free(&(lval->var), var);
+
+    dest->type = T_LVALUE;
+    dest->x.lvalue_type = LVALUE_PROTECTED_RANGE;
+    dest->u.protected_range_lvalue = lval;
 } /* assign_char_lvalue_no_free() */
 
 /*-------------------------------------------------------------------------*/
@@ -5281,14 +5276,11 @@ protected_range_lvalue (int code, svalue_t *sp)
  */
 
 {
+    svalue_t *var;         /* The variable containing the vector. */
     svalue_t *vec;         /* the indexed vector or string */
     svalue_t *i;           /* the index */
     int            ind1, ind2;  /* Lower and upper range index */
     mp_int         size;        /* size of <vec> in elements */
-    short          lvalue_type; /* Result type */
-    svalue_t  protector;   /* Protecting svalue saved from v */
-    struct protected_range_lvalue *new_lvalue;
-                                /* Result protector structure */
 
 #ifdef DEBUG
     if (sp->type != T_LVALUE || sp->x.lvalue_type != LVALUE_UNPROTECTED)
@@ -5302,11 +5294,8 @@ protected_range_lvalue (int code, svalue_t *sp)
     /* Get the arguments, and also remember the protector in case v
      * is a protected lvalue.
      */
-    vec = sp->u.lvalue; /* deref initial lvalue */
+    vec = var = sp->u.lvalue; /* deref initial lvalue */
     i = sp - 1;
-
-    /* TODO: Remove the protector. */
-    protector.type = T_INVALID;
 
     /* Deref any possibly following lvalues
      */
@@ -5331,30 +5320,10 @@ protected_range_lvalue (int code, svalue_t *sp)
     switch(vec->type)
     {
     case T_POINTER:
-        (void)ref_array(vec->u.vec); /* Count the coming protector */
-        lvalue_type = T_PROTECTED_POINTER_RANGE_LVALUE;
         size = (mp_int)VEC_SIZE(vec->u.vec);
         break;
 
     case T_STRING:
-        /* If the string is tabled, i.e. not changeable, or has more than
-         * one reference, allocate a new copy which can be changed safely.
-         */
-        if (!mstr_singular(vec->u.str))
-        {
-            string_t *p;
-
-            memsafe(p = unshare_mstring(vec->u.str), mstrsize(vec->u.str)
-                   , "modifiable string");
-            vec->u.str = p;
-        }
-
-        /* Add another reference to the string to keep it alive while
-         * we use it.
-         */
-        (void)ref_mstring(vec->u.str);
-
-        lvalue_type = T_PROTECTED_STRING_RANGE_LVALUE;
         size = (mp_int)mstrsize(vec->u.str);
         break;
 
@@ -5434,21 +5403,10 @@ protected_range_lvalue (int code, svalue_t *sp)
         return NULL;
     }
 
-    /* Build the protector */
-    new_lvalue = (struct protected_range_lvalue *)xalloc(sizeof *new_lvalue);
-    new_lvalue->v.type = lvalue_type;
-    new_lvalue->v.u = vec->u;
-    new_lvalue->protector = protector;
-    new_lvalue->lvalue = vec;
-    new_lvalue->index2 = ind2;
-    new_lvalue->index1 = ind1;
-    new_lvalue->size = size;
-
     /* Drop the arguments and return the result */
-
     sp = i;
 
-    assign_lvalue_no_free(sp, &new_lvalue->v);
+    assign_protected_range_lvalue_no_free(sp, var, vec, ind1, ind2);
 
     return sp;
 } /* protected_range_lvalue() */

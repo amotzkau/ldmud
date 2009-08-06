@@ -116,15 +116,27 @@ struct protected_lvalue
 };
 
 /* --- struct protected_char_lvalue: protect an lvalue to a single
- * character in a string. We'll save a counted reference to the string
- * and also make the variable holding the string a protected lvalue,
- * so we are able to update variable.
+ * character in a string. We'll save a counted reference to the string.
  */
 struct protected_char_lvalue
 {
     p_int     ref;   /* Number of references to this structure. */
     string_t *str;   /* The string that is indexed. */
     char     *charp; /* The indexed character. */
+};
+
+/* -- struct protected_range_lvalue: protected an lvalue to a
+ * string or vector range. The reference to the vector is counted.
+ * We also make the variable holding the vector a protected lvalue,
+ * so we are able to update variable.
+ */
+struct protected_range_lvalue
+{
+    p_int    ref;                    /* Number of references, */
+    svalue_t vec;                    /* The string or vector containing the range. */
+    svalue_t var;                    /* A protected lvalue containing the
+                                        variable with the vector. */
+    mp_int   index1, index2;         /* first and last index of the range */
 };
 
 /* --- Constants --- */

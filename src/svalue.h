@@ -43,8 +43,6 @@ union u {
        */
     vector_t *vec;
       /* T_POINTER, T_QUOTED_ARRAY: pointer to the vector structure.
-       * T_(PROTECTED_)POINTER_RANGE_LVALUE: the target vector holding
-       *   the range.
        */
 #ifdef USE_STRUCTS
      struct_t *strct;
@@ -181,38 +179,30 @@ struct svalue_s
 #endif /* USE_STRUCTS */
 
 
-  /* The following types must be used only in svalues referenced
-   * by a T_LVALUE svalue.
-   */
-#define T_PROTECTED_STRING_RANGE_LVALUE   0x10
-  /* A protected string range lvalue */
-#define T_PROTECTED_POINTER_RANGE_LVALUE  0x11
-  /* A protected pointer/mapping range lvalue */
-
-#define T_CALLBACK                        0x14
+#define T_CALLBACK      0xc
   /* A callback structure referenced from the stack to allow
    * proper cleanup during error recoveries. The interpreter
    * knows how to free it, but that's all.
    */
 
-#define T_ERROR_HANDLER                   0x15
+#define T_ERROR_HANDLER 0xd
   /* Not an actual value, this is used internally for cleanup
    * operations. See the description of the error_handler() member
    * for details.
    */
 
-#define T_BREAK_ADDR                      0x16
+#define T_BREAK_ADDR    0xe
   /* Not an actual type, it's used internally for saving
    * the address where break statements within switch statements
    * should branch to.
    */
 
-#define T_NULL                            0x17
+#define T_NULL          0xf
   /* Not an actual type, this is used in the efun_lpc_types[] table
    * to encode the acceptance of '0' instead of the real datatype.
    */
 
-#define T_MOD_SWAPPED    0x80
+#define T_MOD_SWAPPED   0x80
   /* This flag is |-ed to the swapped-out type value if the value
    * data has been swapped out.
    */
@@ -309,6 +299,17 @@ struct svalue_s
   /* u.protected_lvalue points to the reference counted svalue. */
 #define LVALUE_PROTECTED_CHAR               0x11
   /* .u.protected_char_lvalue contains the referenced string and index. */
+#define LVALUE_PROTECTED_RANGE              0x12
+  /* .u.protected_range contains the referenced vector and indices. */
+
+
+#define LVALUE_IS_UNPROTECTED(l)        ((l) < LVALUE_PROTECTED)
+  /* TRUE if the lvalue is an unprotected one.
+  */
+
+#define LVALUE_IS_PROTECTED(l)          ((l) >= LVALUE_PROTECTED)
+  /* TRUE if the lvalue is a protected one.
+  */
 
 /* --- The primary types in bit-flag encoding ---
  *

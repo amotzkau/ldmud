@@ -3644,40 +3644,6 @@ setup_callback_args (callback_t *cb, int nargs, svalue_t * args
 
         while (--nargs >= 0)
         {
-            Bool dontHandle = MY_FALSE;
-
-            if (args->type == T_LVALUE && args->x.lvalue_type == LVALUE_UNPROTECTED)
-            {
-                /* Check if we are allowed to handle the lvalues. */
-                Bool isProtected
-                  = (   args->u.lvalue->type == T_PROTECTED_STRING_RANGE_LVALUE
-                     || args->u.lvalue->type == T_PROTECTED_POINTER_RANGE_LVALUE
-                    );
-
-                dontHandle =    ( delayed_callback && !isProtected)
-                             || (!delayed_callback &&  isProtected)
-                             ;
-            }
-
-            if (dontHandle)
-            {
-                /* We don't handle the lvalue - abort the process.
-                 * But to do that, we first have to free all
-                 * remaining arguments from the caller.
-                 */
-
-                int error_index = cb->num_arg - nargs - 1;
-
-                do {
-                    free_svalue(args++);
-                    (dest++)->type = T_INVALID;
-                } while (--nargs >= 0);
-
-                free_callback_args(cb);
-
-                return error_index;
-            }
-
             transfer_svalue_no_free(dest++, args++);
         }
     }
