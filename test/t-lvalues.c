@@ -85,6 +85,15 @@ mixed *tests = ({
             return val == 10; /* Shouldn't have changed. */
         :)
     }),
+    ({ "Reference loops", 0,
+       (:
+           mixed a = 10;
+           mixed b =  &a;
+           a = &b;
+
+           return (a==10);
+       :)
+    })
 });
 
 void run_test()

@@ -1795,27 +1795,11 @@ static INLINE void
 check_aggregate_types (int n)
 
 /* The last <n> types on the argument stack are an aggregate type.
- * Combine the single types and make sure that none is a reference type.
+ * Combine the single types.
  */
 
 {
-    vartype_t *argp;
-    typeid_t   mask;
-
-    argp = (vartype_t *) (type_of_arguments.block +
-          (type_of_arguments.current_size -= sizeof (vartype_t) * n) );
-
-    /* We're just interested in TYPE_MOD_REFERENCE, so we preset all
-     * other bits with 1.
-     */
-    for (mask = ~TYPE_MOD_REFERENCE; --n >= 0; )
-    {
-        mask |= argp->type;
-        argp++;
-    }
-
-    if (!(~mask & 0xffff))
-        yyerror("Can't trace reference assignments.");
+    type_of_arguments.current_size -= sizeof (vartype_t) * n;
 } /* check_aggregate_types() */
 
 
@@ -7946,9 +7930,6 @@ expr_decl:
               yyerror("Only plain assignments allowed here");
           }
 
-          if (type2.typeflags & TYPE_MOD_REFERENCE)
-              yyerror("Can't trace reference assignments");
-
           /* Add the bytecode to create the lvalue and do the
            * assignment.
            */
@@ -8754,8 +8735,9 @@ expr0:
       /* Normal assign:               ||= (&&= analog):
        *
        *  <expr0>               <lvalue>         <lvalue>
-       *  <lvalue>              LDUP             LDUP
-       *  ASSIGN-operator       LOR l            DUP
+       *  <lvalue>              F_PROTECT_LVALUE F_PROTECT_LVALUE
+       *  ASSIGN-operator       LDUP             LDUP
+       *                        LOR l            DUP
        *                        <expr0>          LBRANCH_WHEN_NON_ZERO l
        *                    l:  SWAP_VALUES      POP_VALUE
        *                        ASSIGN           <expr0>
@@ -8773,6 +8755,7 @@ expr0:
 
               /* Add the operator specific code */
 
+              ins_f_code(F_PROTECT_LVALUE);
               if ($2 == F_LAND_EQ)
               {
                   /* Insert the LDUP, LAND and remember the position */
@@ -8917,9 +8900,6 @@ expr0:
                */
               restype = type1;
           }
-
-          if (type2.typeflags & TYPE_MOD_REFERENCE)
-              yyerror("Can't trace reference assignments.");
 
 #ifdef USE_STRUCTS
           /* Special checks for struct assignments */
@@ -10424,8 +10404,7 @@ expr4:
           /* Generate an array */
 
           check_aggregate_types($4);
-            /* We don't care about these types,
-             * unless a reference appears
+            /* We don't care about these types.
              */
 
           ins_f_code(F_AGGREGATE);
@@ -10448,8 +10427,7 @@ expr4:
           int quotes;
 
           check_aggregate_types($3);
-            /* We don't care about these types,
-             * unless a reference appears
+            /* We don't care about these types.
              */
 
           ins_f_code(F_AGGREGATE);
@@ -10838,19 +10816,19 @@ expr4:
 
           if (i & VIRTUAL_VAR_TAG)
           {
-              *p++ = F_PUSH_VIRTUAL_VARIABLE_LVALUE;
+              *p++ = F_PUSH_PROTECTED_VIRTUAL_VARIABLE_LVALUE;
               *p = i;
           }
           else
           {
               if ((i + num_virtual_variables) & ~0xff)
               {
-                  *p = F_PUSH_IDENTIFIER16_LVALUE;
+                  *p = F_PUSH_PROTECTED_IDENTIFIER16_LVALUE;
                   upd_short(++current, i + num_virtual_variables);
               }
               else
               {
-                  *p++ = F_PUSH_IDENTIFIER_LVALUE;
+                  *p++ = F_PUSH_PROTECTED_IDENTIFIER_LVALUE;
                   *p = i + num_virtual_variables;
               }
           }
@@ -10893,12 +10871,12 @@ expr4:
 #ifdef USE_NEW_INLINES
           if ($2->u.local.context >= 0)
           {
-              *p++ = F_PUSH_CONTEXT_LVALUE;
+              *p++ = F_PUSH_PROTECTED_CONTEXT_LVALUE;
               *p = $2->u.local.context;
           }
           else
           {
-              *p++ = F_PUSH_LOCAL_VARIABLE_LVALUE;
+              *p++ = F_PUSH_PROTECTED_LOCAL_VARIABLE_LVALUE;
               *p = $2->u.local.num;
           }
           $$.type.typeflags |= TYPE_MOD_REFERENCE;
@@ -14240,9 +14218,6 @@ if (current_inline && current_inline->parse_context)
     {
         yyerror("Only plain assignments allowed here");
     }
-
-    if (type2.typeflags & TYPE_MOD_REFERENCE)
-        yyerror("Can't trace reference assignments");
 
     if (!add_lvalue_code(lv, F_VOID_ASSIGN))
         return;

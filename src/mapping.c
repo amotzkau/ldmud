@@ -3839,7 +3839,7 @@ v_walk_mapping (svalue_t *sp, int num_arg)
         /* Push the values as lvalues */
         for (j = num_values, data = (read_pointer++)->u.lvalue; --j >= 0; )
         {
-             assign_lvalue_no_free(++sp2, data++);
+             assign_protected_lvalue_no_free(++sp2, data++);
         }
 
         /* Call the function */
@@ -4324,7 +4324,7 @@ v_m_contains (svalue_t *sp, int num_arg)
 
     /* Test the arguments */
     for (i = -num_arg; ++i < -1; )
-        if (sp[i].type != T_LVALUE)
+        if (sp[i].type != T_LVALUE || sp[i].x.lvalue_type != LVALUE_PROTECTED)
             vefun_arg_error(num_arg + i, T_LVALUE, sp[i].type, sp);
     if (sp[-1].type != T_MAPPING)
         vefun_arg_error(num_arg-1, T_MAPPING, sp[-1].type, sp);
@@ -4351,12 +4351,12 @@ v_m_contains (svalue_t *sp, int num_arg)
         /* TODO: May this cause problems elsewhere, too? */
         if (destructed_object_ref(item))
         {
-            assign_svalue(sp[i].u.lvalue, &const0);
+            assign_svalue(&(sp[i].u.protected_lvalue->val), &const0);
             item++;
         }
         else
             /* mapping must not have been freed yet */
-            assign_svalue(sp[i].u.lvalue, item++);
+            assign_svalue(&(sp[i].u.protected_lvalue->val), item++);
         free_svalue(&sp[i]);
     }
 

@@ -30,9 +30,6 @@ union u {
        * T_(PROTECTED_)STRING_RANGE_LVALUE: the target string holding
        *   the range.
        */
-    char     *charp;
-      /* LVALUE_UNPROTECTED_CHAR: pointer to the referenced character.
-       */
     p_int number;
       /* T_NUMBER: the number.
        */
@@ -290,7 +287,9 @@ struct svalue_s
 #define LVALUE_UNPROTECTED                  0x00
   /* .u.lvalue points to the referenced svalue. */
 #define LVALUE_UNPROTECTED_CHAR             0x01
-  /* .u.charp points to the referenced character in a string. */
+  /* Doesn't have a value. The referenced character is
+   * stored in <current_unprotected_char>.
+   */
 #define LVALUE_UNPROTECTED_RANGE            0x02
   /* Doesn't have a value. The vector and indices are stored in
    * <current_unprotected_range>.

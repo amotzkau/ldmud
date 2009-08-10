@@ -7535,7 +7535,6 @@ f_reverse(svalue_t *sp)
 
     /* If the argument is passed in by reference, make sure that it is
      * an array, note the fact, and place it directly into the stack.
-     * TODO: Allow protected ranges here.
      */
     if (sp->type == T_LVALUE)
     {
@@ -7546,13 +7545,105 @@ f_reverse(svalue_t *sp)
         {
             switch (svp->x.lvalue_type)
             {
-            case LVALUE_UNPROTECTED:
-                svp = svp->u.lvalue;
-                continue;
-
             case LVALUE_PROTECTED:
                 svp = &(svp->u.protected_lvalue->val);
                 continue;
+
+            case LVALUE_PROTECTED_RANGE:
+              {
+                struct protected_range_lvalue *r;
+
+                r = svp->u.protected_range_lvalue;
+                switch(r->vec.type)
+                {
+                case T_POINTER:
+                  {
+                    mp_int v_size = r->index2 - r->index1;
+                    mp_int half, i;
+                    svalue_t *start;
+
+                    vec = r->vec.u.vec;
+                    start = vec->item + r->index1;
+
+                    DYN_ARRAY_COST(v_size);
+
+                    i = 0;
+                    half = v_size / 2;
+                    while (i < half)
+                    {
+                        svalue_t tmp;
+                        tmp   = *(start + i);
+                        *(start + i) = *(start + (v_size - 1) - i);
+                        *(start + (v_size - 1) - i) = tmp;
+                        i++;
+                    }
+
+                    /* Put the slice on the stack. */
+                    vec = slice_array(vec, r->index1, r->index2-1);
+                    free_svalue(sp);
+                    put_array(sp, vec);
+
+                    break;
+                  }
+
+                case T_STRING:
+                    if (r->index2 <= r->index1)
+                    {
+                        put_string(sp, STR_EMPTY);
+                        break;
+                    }
+                    else
+                    {
+
+                        size_t len = mstrsize(r->vec.u.str);
+                        mp_int part = r->index2 - r->index1;
+                        char *src, *dest;
+                        string_t *res;
+
+                        memsafe(res = alloc_mstring(len), len, "partly reversed string");
+                        src = get_txt(r->vec.u.str);
+                        dest = get_txt(res);
+
+                        if(r->index1)
+                        {
+                            memcpy(dest, src, (size_t) r->index1);
+                            dest += r->index1;
+                        }
+
+                        src += r->index2;
+                        while (part--)
+                            *dest++ = *--src;
+
+                        if(len > r->index2)
+                            memcpy(dest, get_txt(r->vec.u.str) + r->index2, (size_t) (len - r->index2));
+
+                        /* Update the lvalue. */
+                        if (r->var.type == T_LVALUE
+                         && r->var.x.lvalue_type == LVALUE_PROTECTED
+                         && r->var.u.protected_lvalue->val.type == T_STRING
+                         && r->var.u.protected_lvalue->val.u.str == r->vec.u.str)
+                        {
+                            free_mstring(r->vec.u.str);
+                            r->var.u.protected_lvalue->val.u.str = ref_mstring(res);
+                        }
+
+                        free_mstring(r->vec.u.str);
+                        r->vec.u.str = res;
+
+                        /* Return the reversed part. */
+                        free_svalue(sp);
+                        memsafe(res = mstr_extract(res, r->index1, r->index2-1), r->index2 - r->index1 + 1, "string range");
+                        put_string(sp, res);
+                        break;
+                    }
+
+                default:
+                    fatal("(reverse) Illegal range %p type %d\n", r, r->vec.type);
+                    /* NOTREACHED */
+                    break;
+                }
+                return sp;
+              }
             }
             break;
         }

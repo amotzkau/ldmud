@@ -1,6 +1,25 @@
 This file lists all changes made to the game driver in all glory detail.
 See the file HISTORY for a user-oriented summary of all the changes.
 
+10-Aug-2009 (Gnomi)
+  - Don't use long-living unprotected lvalues to implement ||=
+    and &&=. (prolang.y)
+  - Don't restrict the use of references. (prolang.y)
+  - &vars now result in protected lvalues. (closures.c, interpret.c)
+  - Throw fatal errors on unexpected unprotected lvalues.
+    (interpret.c, efuns.c, comm.c)
+  - Store more information for unprotected char lvalues to be able
+    to make them protected later. (interpret.c, svalue.h)
+  - Removed assign_checked_svalue_no_free(), implemented check_svalue()
+    instead. (interpret.c)
+  - Renamed assign_local_svalue_no_free() to assign_rvalue_no_free().
+    (interpret.c)
+  - Removed assign_lrvalue_no_free(), it's now the same as
+    assign_svalue_no_free(). (interpret.c)
+  - Changed a few assign_svalue_no_free() calls into assign_rvalue_no_free().
+    (interpret.c)
+  - A few small fixes.
+
 06-Aug-2009 (Gnomi)
   - Migrated T_PROTECTED_STRING_RANGE_LVALUE and
     T_PROTECTED_POINTER_RANGE_LVALUE into LVALUE_PROTECTED_RANGE.

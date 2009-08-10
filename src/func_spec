@@ -146,6 +146,7 @@
         pop_second
         dup
         ldup
+        protect_lvalue
         swap_values
         clear_locals
         save_arg_frame
@@ -202,6 +203,13 @@
         nx_range_lvalue
         rx_range_lvalue
         ax_range_lvalue
+        push_protected_identifier_lvalue
+        push_protected_identifier16_lvalue
+        push_protected_virtual_variable_lvalue
+        push_protected_local_variable_lvalue
+#ifdef USE_NEW_INLINES
+        push_protected_context_lvalue
+#endif
         push_protected_indexed_lvalue
         push_protected_rindexed_lvalue
         push_protected_aindexed_lvalue

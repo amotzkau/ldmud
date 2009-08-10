@@ -4780,8 +4780,16 @@ compile_lvalue (svalue_t *argp, int flags)
 
         if (current.code_left < 3)
             realloc_code();
-        current.code_left -= 2;
-        STORE_CODE(current.codep, F_PUSH_LOCAL_VARIABLE_LVALUE);
+        if (flags & PROTECT_LVALUE)
+        {
+            current.code_left -= 2;
+            STORE_CODE(current.codep, F_PUSH_PROTECTED_LOCAL_VARIABLE_LVALUE);
+        }
+        else
+        {
+            current.code_left -= 2;
+            STORE_CODE(current.codep, F_PUSH_LOCAL_VARIABLE_LVALUE);
+        }
         STORE_UINT8(current.codep, (bytecode_t)sym->index);
         return;
       }
@@ -5099,10 +5107,20 @@ compile_lvalue (svalue_t *argp, int flags)
                     break;
                 if (current.code_left < 3)
                     realloc_code();
-                current.code_left -= 2;
                 if ((short)l->function.var_index < 0)
                     lambda_error("Variable not inherited\n");
-                STORE_CODE(current.codep, F_PUSH_IDENTIFIER_LVALUE);
+
+                if (flags & PROTECT_LVALUE)
+                {
+                    current.code_left -= 2;
+                    STORE_CODE(current.codep, F_PUSH_PROTECTED_IDENTIFIER_LVALUE);
+                }
+                else
+                {
+                    current.code_left -= 2;
+                    STORE_CODE(current.codep, F_PUSH_IDENTIFIER_LVALUE);
+                }
+
                 STORE_UINT8(current.codep, (bytecode_t)l->function.var_index);
                 return;
               }
@@ -5126,10 +5144,19 @@ compile_lvalue (svalue_t *argp, int flags)
                 break;
             if (current.code_left < 3)
                 realloc_code();
-            current.code_left -= 2;
             if ((short)l->function.var_index < 0)
                 lambda_error("Variable not inherited\n");
-            STORE_CODE(current.codep, F_PUSH_IDENTIFIER_LVALUE);
+
+            if (flags & PROTECT_LVALUE)
+            {
+                current.code_left -= 2;
+                STORE_CODE(current.codep, F_PUSH_PROTECTED_IDENTIFIER_LVALUE);
+            }
+            else
+            {
+                current.code_left -= 2;
+                STORE_CODE(current.codep, F_PUSH_IDENTIFIER_LVALUE);
+            }
             STORE_CODE(current.codep, (bytecode_t)(l->function.var_index));
             return;
           }
