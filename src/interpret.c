@@ -6460,22 +6460,26 @@ unravel_lvalue_indirection(svalue_t *svp)
 
 /*-------------------------------------------------------------------------*/
 static INLINE Bool
-check_rtt_compatibility_inl(vartype_t formaltype, svalue_t *svp)
+check_rtt_compatibility_inl(lpctype_t *formaltype, svalue_t *svp)
 // This function checks if <formal_type> and the svalue pointed to by <svp>
 // are compatible (that means, it is allowed to assign *svp to an LPC variable
 // having the type described by <formal_type>. The function handles lvalues,
 // but the lvalue property is ignored for assessing the compatibility.
 // returns MY_TRUE if *<svp> is compatible to <formal_type>, MY_FALSE otherwise.
 {
-    
+    lpctype_t *valuetype = NULL;
+
     svp = unravel_lvalue_indirection(svp);
-    
-    // mixed accepts anything... Also zero (0) is considered to be an element
-    // of any type.
-    if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_ANY
-        || (svp->type == T_NUMBER && svp->u.number == 0))
+
+    // No type saved? Anything is possible...
+    if (!formaltype)
         return MY_TRUE;
-    
+
+    // Shortcut, mixed accepts anything.
+    if (formaltype == lpctype_unknown || formaltype == lpctype_mixed)
+        return MY_TRUE;
+
+    // Now, let's determine the compiler type corresponding to svp.
     switch(svp->type)
     {
         // These should anyway not happen...
@@ -6486,67 +6490,94 @@ check_rtt_compatibility_inl(vartype_t formaltype, svalue_t *svp)
             return MY_FALSE;
 
         case T_STRING:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_STRING)
-                return MY_TRUE;
-            return MY_FALSE;
-                        
+            valuetype = lpctype_string;
+            break;
+
         case T_POINTER:
+        {
+            // We have to look into it...
+            // (int|string)* is different from int*|string*.
+            // In the later case we have to check both cases independently.
+            lpctype_t* head = formaltype;
+            while (true)
+            {
+                // Walk through all possibilities of <formaltype>.
+                lpctype_t *member = head->t_class == TCLASS_UNION ? head->t_union.member : head;
+                if (member->t_class == TCLASS_ARRAY)
+                {
+                    lpctype_t *element = member->t_array.element;
+                    vector_t *vec = svp->u.vec;
+                    size_t i, size = VEC_SIZE(vec);
+                    Bool correct = MY_TRUE;
+
+                    for (i=0; i < size; i++)
+                        if(!check_rtt_compatibility_inl(element, vec->item + i))
+                        {
+                            correct = MY_FALSE;
+                            break;
+                        }
+
+                    if (correct)
+                        return MY_TRUE;
+                }
+
+                if (head->t_class == TCLASS_UNION)
+                    head = head->t_union.head;
+                else
+                    return MY_FALSE; // No valid type found.
+            }
+        }
+
         case T_QUOTED_ARRAY:
-            // unfortunately, there is no real information about the types of 
-            // the vector in the svalue.
-            if (formaltype.type & TYPE_MOD_POINTER)
-                return MY_TRUE;
-            return MY_FALSE;
+            valuetype = lpctype_quoted_array;
+            break;
 
         case T_MAPPING:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_MAPPING)
-                return MY_TRUE;
-            return MY_FALSE;
-        
+            valuetype = lpctype_mapping;
+            break;
+
         case T_CLOSURE:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_CLOSURE)
-                return MY_TRUE;
-            return MY_FALSE;
-            
+            valuetype = lpctype_closure;
+            break;
+
         case T_SYMBOL:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_SYMBOL)
-                return MY_TRUE;
-            return MY_FALSE;
-            
+            valuetype = lpctype_symbol;
+            break;
+
         case T_NUMBER:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_NUMBER)
+            // Zero (0) is considered to be an element of any type.
+            if (svp->u.number == 0)
                 return MY_TRUE;
-            return MY_FALSE;
-            
+
+            valuetype = lpctype_int;
+            break;
+
         case T_FLOAT:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_FLOAT)
-                return MY_TRUE;
-            return MY_FALSE;
-            
+            valuetype = lpctype_float;
+            break;
+
         case T_OBJECT:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_OBJECT)
-                return MY_TRUE;
-            return MY_FALSE;
-            
+            valuetype = lpctype_object;
+            break;
+
         case T_STRUCT:
-            if ((formaltype.type & PRIMARY_TYPE_MASK) == TYPE_STRUCT)
-            {
-                // allow structs having the declared struct as a base.
-                if (struct_baseof(formaltype.t_struct, svp->u.strct->type) > 0)
-                    return MY_TRUE;
-            }
-            return MY_FALSE;
-        
-        // any lvalue indirections must have been unraveled before.
-            
-    } // switch(svp->type)
+            valuetype = get_struct_type(svp->u.strct->type);
+            break;
+    }
+
+    if (valuetype)
+    {
+        Bool result = lpctype_contains(valuetype, formaltype);
+        free_lpctype(valuetype);
+        return result;
+    }
 
     // Fall-through
     return MY_FALSE;
 } // check_rtt_compatibility()
 
 Bool
-check_rtt_compatibility(vartype_t formaltype, svalue_t *svp) 
+check_rtt_compatibility(lpctype_t *formaltype, svalue_t *svp) 
 {
     return check_rtt_compatibility_inl(formaltype, svp);
 }
@@ -6571,7 +6602,7 @@ check_function_args(int fx, program_t *progp, bytecode_p funstart)
         && progp->type_start && progp->type_start[fx] != INDEX_START_NONE)
     {
         // check for the correct argument types
-        vartype_t *arg_type = progp->argument_types + progp->type_start[fx];
+        lpctype_t **arg_type = progp->argument_types + progp->type_start[fx];
         svalue_t *firstarg = inter_sp - csp->num_local_variables + 1;
         function_t *header = progp->function_headers + FUNCTION_HEADER_INDEX(funstart);
 
@@ -6616,12 +6647,11 @@ check_function_args(int fx, program_t *progp, bytecode_p funstart)
                     // or it is a left-over from last execution.
                     inter_pc = funstart;
                 }
-                fulltype_t ft = { .typeflags = arg_type[i].type, .t_struct = arg_type[i].t_struct };
                 // unravel any lvalue indirection (if any)
                 svalue_t *svp = unravel_lvalue_indirection(&firstarg[i]);
                 errorf("Bad arg %d to %s(): got '%s', expected '%s'.\n"
                        , i+1, get_txt(header->name), typename(svp->type),
-                       get_type_name(ft));
+                       get_lpctype_name(arg_type[i]));
             }
             ++i;
         }
@@ -7297,9 +7327,9 @@ adjust_variable_offsets ( const inherit_t * inheritp
      && inheritp->prog->num_variables
      && (prog->variables[inheritp->variable_index_offset
                          +inheritp->prog->num_variables-1
-                        ].type.typeflags & TYPE_MOD_VIRTUAL)
+                        ].type.t_flags & TYPE_MOD_VIRTUAL)
      && !(inheritp->prog->variables[inheritp->prog->num_variables-1
-                                   ].type.typeflags & TYPE_MOD_VIRTUAL)
+                                   ].type.t_flags & TYPE_MOD_VIRTUAL)
        )
     {
         /* Now search for the first virtual inheritance of the program
@@ -7315,7 +7345,7 @@ adjust_variable_offsets ( const inherit_t * inheritp
             if (inh->prog == inheritp->prog
              && obj->prog->variables[inh->variable_index_offset
                                      +inh->prog->num_variables-1
-                                    ].type.typeflags&TYPE_MOD_VIRTUAL
+                                    ].type.t_flags&TYPE_MOD_VIRTUAL
                )
                 break;
             inh++;
@@ -8227,12 +8257,12 @@ again:
     if (num_arg != -1 && !use_ap)
     {
         expected_stack = sp - num_arg +
-            ( instrs[full_instr].ret_type.typeflags == TYPE_VOID ? 0 : 1 );
+            ( instrs[full_instr].ret_type == lpctype_void ? 0 : 1 );
     }
     else if (use_ap)
     {
         expected_stack = ap -
-            ( instrs[full_instr].ret_type.typeflags == TYPE_VOID ? 1 : 0 );
+            ( instrs[full_instr].ret_type == lpctype_void ? 1 : 0 );
     }
     else
     {
@@ -8982,17 +9012,13 @@ again:
             && csp->funstart != EFUN_FUNSTART)
         {
             function_t *header = current_prog->function_headers + FUNCTION_HEADER_INDEX(csp->funstart);
-            vartype_t rtype;
 
-            rtype.type = header->type.typeflags & TYPE_MOD_MASK;
-            rtype.t_struct = header->type.t_struct;
-            // functions declared without type may return anything... *sigh*
-            if (rtype.type != TYPE_UNKNOWN && !check_rtt_compatibility(rtype, sp))
+            if (!check_rtt_compatibility(header->type, sp))
             {
                 inter_sp = sp;
                 errorf("Bad return type in %s(): got '%s', expected '%s'.\n",
                        get_txt(header->name), typename(sp->type),
-                       get_type_name(header->type));
+                       get_lpctype_name(header->type));
             }
         }
         
@@ -18598,7 +18624,7 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool allowRefs, Bool external)
                 *p++ = instrs[i].opcode;
 
                 /* And finally the return instruction */
-                if ( instrs[i].ret_type.typeflags == TYPE_VOID )
+                if ( instrs[i].ret_type == lpctype_void )
                     *p++ = F_RETURN0;
                 else
                     *p++ = F_RETURN;
