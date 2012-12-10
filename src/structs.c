@@ -463,6 +463,7 @@ struct_new_prototype ( string_t *name )
         pSType->unique_name = NULL;
         pSType->hash = 0;
         pSType->prog_id = 0;
+        pSType->lpctype = NULL;
         pSType->num_members = 0;
         pSType->member = NULL;
         pSType->base = NULL;
@@ -1071,6 +1072,7 @@ clear_struct_type_ref (struct_type_t * pSType)
 
         pSType->ref = 0;
         pSType->name->info.ref = 0;
+        pSType->lpctype = NULL;
         if (pSType->prog_name)
             pSType->prog_name->info.ref = 0;
         if (pSType->unique_name)

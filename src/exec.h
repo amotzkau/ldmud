@@ -151,112 +151,11 @@
 
 #include "driver.h"
 #include "typedefs.h"
+#include "types.h"
 
 #include "bytecode.h"
 
-
-typedef unsigned short    typeid_t;
-typedef uint32            typeflags_t;
-typedef struct vartype_s  vartype_t;
-typedef struct fulltype_s fulltype_t;
-
-
-/* --- Type Constants ---
- *
- * These constants and types are used to encode types and visibility
- * of variables and functions. They are used by both the compiler and
- * the interpreter.
- *
- * Variable/value data types consist of three pieces: 
- *  - the primary type constant, optionally modified as
- *      TYPE_MOD_POINTER or TYPE_MOD_REFERENCE;
- *  - the visibility (see below with the function flags for the constants)
- *  - the type object pointer (depending on context either counted or not
- *      counted).
- *
- * The pieces show up in these types:
- *  - vartype:  datatype + type object pointer
- *  - fulltype: vartype + visibility flags
- *
- * TODO: A clean implementation would use just type objects for types.
- */
-
-/* --- struct vartype_s: Basic type information
- *
- * This structure holds the type number, the flags concerning _MOD_POINTER
- * and _MOD_REFERENCE, and the virtual variable flag (for use in variable_t).
- * It also holds a pointer to the type object; depending on the context
- * this reference may be counted or not.
- */
-
-struct vartype_s {
-    typeid_t        type;
-    struct_type_t * t_struct;
-      /* For now, only structs have type objects */
-};
-
-/* --- struct fulltype_s: Full type information
- *
- * This structure holds the type number and all flags: type modifiers and
- * visibility.
- * It also holds a pointer to the type object; depending on the context
- * this reference may be counted or not.
- *
- * We do not reuse vartype_t her even though it logically should be, for
- * two reasons:
- *  - the visibility modifier flags expected that type and flags are
- *    in one single long
- *  - some compilers would add 2 bytes of padding
- *
- * TODO: Move the basic visibility  into the lower bits so we don't have
- * TODO:: to use a short for .typeflags.
- */
-struct fulltype_s {
-    typeflags_t     typeflags;
-    struct_type_t * t_struct;
-      /* For now, only structs have type objects */
-};
-
-/* --- Primary type values --- */
-enum primary_types {
-    TYPE_UNKNOWN      =  0,   /* This type must be casted */
-    TYPE_NUMBER       =  1,
-    TYPE_STRING       =  2,
-    TYPE_VOID         =  3,
-    TYPE_OBJECT       =  4,
-    TYPE_MAPPING      =  5,
-    TYPE_FLOAT        =  6,
-    TYPE_ANY          =  7,  /* Will match any type */
-    TYPE_CLOSURE      =  8,
-    TYPE_SYMBOL       =  9,
-    TYPE_QUOTED_ARRAY = 10,
-    TYPE_STRUCT       = 11,   /* Secondary info is the struct id */
-
-    TYPEMAP_SIZE      = 12,   /* Number of types */
-};
-
-/* Flags, or'ed on top of the basic type */
-enum type_flags {
-    TYPE_MOD_POINTER   = 0x0040,       /* Pointer to a basic type */
-    TYPE_MOD_REFERENCE = 0x0080,       /* Reference to a type */
-    TYPE_MOD_MASK      = 0x000000ff,   /* Mask for basic type and flags. */
-  
-    /* Mask for the primary type info (sans modifiers) */
-    PRIMARY_TYPE_MASK  = 0x0F,
-
-    /* Mask to delete TYPE_MOD_REFERENCE and the visibility mods from
-     * a type value. */
-    TYPE_MOD_RMASK     = (TYPE_MOD_MASK & ~TYPE_MOD_REFERENCE),
-
-     /* Mask to mask out just the typeid_t from a typeflags_t.
-      */
-    TYPEID_MASK        = 0x0000ffff,
-
-     /* Flag set in virtual variables, also interpreted as offset
-      * in the variable index for virtual variables. */
-    VIRTUAL_VAR_TAG    = 0x4000,
-};
-
+#if 0 // Let's have a look what we need...
 
 /* Macros to check a type value for a certain primary type.
  */
@@ -270,6 +169,7 @@ static INLINE Bool IS_TYPE_ANY(fulltype_t t) {
     return (t.typeflags & (PRIMARY_TYPE_MASK|TYPE_MOD_POINTER|TYPE_MOD_REFERENCE)) 
              == TYPE_ANY;
 }
+#endif
 
 /* Other type related defines */
 enum {
@@ -279,84 +179,6 @@ enum {
    * in a single bytecode.
    */
 };
-
-
-/* void ref_vartype_data(vartype_t *v)
- *   Add another reference to the data associated with vartype <v>.
- * 
- * void ref_fulltype_data(fulltype_t *v)
- *   Add another reference to the data associated with fulltype <v>.
- */
-
-#define ref_vartype_data(v) \
-    do{ vartype_t *fvt = v; \
-        if (fvt->t_struct) (void)ref_struct_type(fvt->t_struct);\
-    } while(0)
-
-#define ref_fulltype_data(v) \
-    do{ fulltype_t *fvt = v; \
-        if (fvt->t_struct) (void)ref_struct_type(fvt->t_struct);\
-    } while(0)
-
-
-/* void free_vartype_data(vartype_t *v)
- *   Free all data associated with vartype <v>.
- * 
- * void free_fulltype_data(fulltype_t *v)
- *   Free all data associated with fulltype <v>.
- */
-
-#define free_vartype_data(v) \
-    do{ vartype_t *fvt = v; \
-        if (fvt->t_struct) { /* printf("DEBUG: free_vartype(%s) %s %d\n", get_txt(fvt->t_struct->name), __FILE__, __LINE__); */ free_struct_type(fvt->t_struct); }\
-        fvt->t_struct = NULL;\
-    } while(0)
-
-#define free_fulltype_data(v) \
-    do{ fulltype_t *fvt = v; \
-        if (fvt->t_struct) { /* printf("DEBUG: free_fulltype(%s) %s %d\n", get_txt(fvt->t_struct->name), __FILE__, __LINE__); */ free_struct_type(fvt->t_struct); }\
-        fvt->t_struct = NULL;\
-    } while(0)
-
-
-#ifdef GC_SUPPORT
-
-/* void clear_vartype_ref(vartype_t *v)
- *   Clear all references associated with vartype <v>.
- * 
- * void clear_fulltype_ref(fulltype_t *v)
- *   Clear all references associated with fulltype <v>.
- */
-
-#define clear_vartype_ref(v) \
-    do{ vartype_t *fvt = v; \
-        if (fvt->t_struct) clear_struct_type_ref(fvt->t_struct);\
-    } while(0)
-
-#define clear_fulltype_ref(v) \
-    do{ fulltype_t *fvt = v; \
-        if (fvt->t_struct) clear_struct_type_ref(fvt->t_struct);\
-    } while(0)
-
-
-/* void count_vartype_ref(vartype_t *v)
- *   Count all references associated with vartype <v>.
- * 
- * void count_fulltype_ref(fulltype_t *v)
- *   Count all references associated with fulltype <v>.
- */
-
-#define count_vartype_ref(v) \
-    do{ vartype_t *fvt = v; \
-        if (fvt->t_struct) count_struct_type_ref(fvt->t_struct);\
-    } while(0)
-
-#define count_fulltype_ref(v) \
-    do{ fulltype_t *fvt = v; \
-        if (fvt->t_struct) count_struct_type_ref(fvt->t_struct);\
-    } while(0)
-
-#endif /* GC_SUPPORT */
 
 
 /* --- struct instr_s: description of stackmachine instructions ---
@@ -472,8 +294,9 @@ enum function_flags {
  * struct fun_hdr {
  *     shared string_t * name_of_function;   (usually 4 Bytes)
  *     unsigned short    function_index in defining program (usually 2 Bytes)
- *     vartype_t         return_type;        (usually 6 Byte)
+ *     vartype_t         return_type;        (usually 4 Bytes)
  *         References from the return_type are not counted!
+ *         (They are counted in function_s.)
  * --> byte              number_formal_args; (1 Byte)
  *         Bit 7: set if the function has a 'varargs' argument
  * TODO: some code makes use of the fact that this makes the number negative
@@ -872,7 +695,7 @@ struct function_s
         function_t *next;        /* used for mergesort */
     } offset;
     funflag_t     flags;      /* Function flags */
-    fulltype_t    type;       /* Return type of function (counted). */
+    lpctype_t    *type;       /* Return type of function (counted). */
     unsigned char num_local;  /* Number of local variables */
     unsigned char num_arg;    /* Number of arguments needed. */
 };

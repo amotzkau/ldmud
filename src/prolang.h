@@ -40,6 +40,7 @@ extern void show_code_window(void);
 #endif
 
 #ifdef GC_SUPPORT
+extern void clear_compiler_refs(void);
 extern void count_compiler_refs(void);
 #endif
 

@@ -1561,42 +1561,6 @@ handle_endif (void)
 
 /*-------------------------------------------------------------------------*/
 static int
-name_to_type (char *name)
-
-/* Return the proper TYPE_ value for the type <name> which must
- * start with 'TYPE_'.
- * Return -1 if the name was not recognized.
- */
-
-{
-    while (isspace((unsigned char)*name))
-        name++;
-    if ( strncmp(name, "TYPE_", (size_t)5) )
-        return -1;
-    name += 5;
-    if ( !strcmp(name, "ANY") )
-        return TYPE_ANY;
-    if ( !strcmp(name, "NUMBER") )
-        return TYPE_NUMBER;
-    if ( !strcmp(name, "FLOAT") )
-        return TYPE_FLOAT;
-    if ( !strcmp(name, "STRING") )
-        return TYPE_STRING;
-    if ( !strcmp(name, "OBJECT") )
-        return TYPE_OBJECT;
-    if ( !strcmp(name, "MAPPING") )
-        return TYPE_MAPPING;
-    if ( !strcmp(name, "CLOSURE") )
-        return TYPE_CLOSURE;
-#ifdef USE_STRUCTS
-    if ( !strcmp(name, "STRUCT") )
-        return TYPE_STRUCT;
-#endif
-    return -1;
-}
-
-/*-------------------------------------------------------------------------*/
-static int
 name_to_hook(char *name)
 
 /* Return the proper H_ value for the driverhook <name> which must
@@ -3298,10 +3262,6 @@ create_lang (void)
             }
             if MATCH("line") {
                 fprintf(fpw, "#line %d \"%s\"\n", current_line+1, PRO_LANG);
-                continue;
-            }
-            if MATCH("typemap") {
-                handle_map(line_buffer+9, TYPEMAP_SIZE, name_to_type);
                 continue;
             }
             if MATCH("hookmap") {

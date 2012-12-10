@@ -6276,7 +6276,7 @@ f_symbol_variable (svalue_t *sp)
             return sp;
         }
 
-        if (current_prog->variables[n].type.typeflags & NAME_HIDDEN)
+        if (current_prog->variables[n].type.t_flags & NAME_HIDDEN)
         {
             if (!privilege_violation(STR_SYMBOL_VARIABLE, sp, sp))
             {
@@ -6321,7 +6321,7 @@ f_symbol_variable (svalue_t *sp)
         num_var = prog->num_variables;
         for (n = num_var; --n >= 0; var++)
         {
-            if (var->name == str && !(var->type.typeflags & NAME_HIDDEN))
+            if (var->name == str && !(var->type.t_flags & NAME_HIDDEN))
                 break;
         }
         free_mstring(str);
@@ -6334,7 +6334,7 @@ f_symbol_variable (svalue_t *sp)
       }
     }
     // check for deprecated object / global variable.
-    if (current_prog->variables[n].type.typeflags & TYPE_MOD_DEPRECATED)
+    if (current_prog->variables[n].type.t_flags & TYPE_MOD_DEPRECATED)
     {
         warnf("Creating closure to deprecated global variable %s.\n",
               get_txt(current_prog->variables[n].name));

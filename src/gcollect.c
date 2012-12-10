@@ -2062,6 +2062,7 @@ garbage_collection(void)
 #if defined(USE_PARSE_COMMAND)
     clear_parse_refs();
 #endif
+    clear_compiler_refs();
     clear_simul_efun_refs();
     clear_interpreter_refs();
     clear_comm_refs();
