@@ -12789,7 +12789,7 @@ function_call:
                           yyerrorf("Function %.50s undefined", get_txt(funp->name));
                       }
                       else if ((funp->flags
-                                & (NAME_UNDEFINED|NAME_PROTOTYPE|NAME_HIDDEN))
+                                & (NAME_PROTOTYPE|NAME_HIDDEN))
                                == NAME_HIDDEN)
                       {
                           yyerrorf("Function %.50s is private", get_txt(funp->name));
@@ -15646,7 +15646,7 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
                                         , current_func_index - n );
                             p->u.global.function = current_func_index;
                         }
-                        else if ( (fun.flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN|NAME_UNDEFINED))
+                        else if ( (fun.flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN))
                                     == (TYPE_MOD_PRIVATE|NAME_HIDDEN) )
                         {
                             /* There is already one function with this
@@ -15656,7 +15656,7 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
 
                             break;
                         }
-                        else if ( (OldFunction->flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN|NAME_UNDEFINED))
+                        else if ( (OldFunction->flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN))
                                      == (TYPE_MOD_PRIVATE|NAME_HIDDEN) )
                         {
                             /* The old one was invisible, ignore it
@@ -15725,7 +15725,7 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
                                         , n - current_func_index );
                         }
                     } /* if (n < first_func_index) */
-                    else if ( (fun.flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN|NAME_UNDEFINED)) 
+                    else if ( (fun.flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN))
                                 != (TYPE_MOD_PRIVATE|NAME_HIDDEN) )
                     {
                         /* This is the dominant definition in the superclass,
@@ -15738,7 +15738,7 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
                          * So the previous definition should be
                          * nominally invisible so we can redefine it.
                          */
-                        if ( (FUNCTION(n)->flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN|NAME_UNDEFINED))
+                        if ( (FUNCTION(n)->flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN))
                                 != (TYPE_MOD_PRIVATE|NAME_HIDDEN) )
                         {
                             fatal(
@@ -16487,6 +16487,10 @@ epilog (void)
                     }
                     CURRENT_PROGRAM_SIZE += FUNCTION_HDR_SIZE + 2;
                 }
+
+                /* Private prototypes don't make sense. */
+                if ((f->flags & (NAME_PROTOTYPE|TYPE_MOD_PRIVATE)) == (NAME_PROTOTYPE|TYPE_MOD_PRIVATE))
+                    yywarnf("Private prototype of '%s' has no definition", get_txt(f->name));
             }
 
             /* Set the function address resp. inherit index in
