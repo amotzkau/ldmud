@@ -1165,7 +1165,7 @@ search_inherited (string_t *str, program_t *prg, int *offpnt)
 /* Auxiliary function to efun replace_program(): check if program <str>
  * is inherited by <prg>. If yes, return the originating program and
  * store the (accumulated) variable and function offsets in offpnt[0]
- * and offpnt[1] resp.
+ * and offpnt[1] resp. (offpnt[2] will indicate, if it's a virtual inherit.)
  *
  * If the program is not found, return NULL.
  *
@@ -1217,6 +1217,7 @@ search_inherited (string_t *str, program_t *prg, int *offpnt)
 #endif
             offpnt[0] = prg->inherit[i].variable_index_offset;
             offpnt[1] = prg->inherit[i].function_index_offset;
+            offpnt[2] = prg->inherit[i].inherit_type == INHERIT_TYPE_NORMAL;
             return prg->inherit[i].prog;
         }
         else if ( NULL != (tmp = search_inherited(str, prg->inherit[i].prog,offpnt)) )
@@ -1227,6 +1228,7 @@ search_inherited (string_t *str, program_t *prg, int *offpnt)
 #endif
             offpnt[0] += prg->inherit[i].variable_index_offset;
             offpnt[1] += prg->inherit[i].function_index_offset;
+            offpnt[2]  = prg->inherit[i].inherit_type == INHERIT_TYPE_NORMAL;
             return tmp;
         }
     }
@@ -2103,6 +2105,7 @@ v_variable_exists (svalue_t *sp, int num_arg)
         program_t *progp;
         int ix;
         typeflags_t flags;
+        bool virtualvar;
 
         shared_name = find_tabled(argp->u.str);
         if (!shared_name)
@@ -2110,7 +2113,7 @@ v_variable_exists (svalue_t *sp, int num_arg)
 
         progp = ob->prog;
 
-        /* Check if the function exists at all */
+        /* Check if the variable exists at all */
         for (ix = 0; ix < progp->num_variables; ix++)
         {
             if (mstreq(shared_name, progp->variables[ix].name))
@@ -2119,6 +2122,10 @@ v_variable_exists (svalue_t *sp, int num_arg)
 
         if (ix >= progp->num_variables)
             break;
+
+        virtualvar = (ix < progp->num_virtual_variables);
+        if (!virtualvar)
+            ix -= progp->num_virtual_variables;
 
         /* Is it visible for the caller? */
         flags = progp->variables[ix].type.t_flags;
@@ -2138,6 +2145,9 @@ v_variable_exists (svalue_t *sp, int num_arg)
             {
                 inherit_t *ip = &progp->inherit[ic];
 
+                if ((ip->inherit_type == INHERIT_TYPE_NORMAL) == virtualvar)
+                    continue;
+
                 if (ix >= ip->variable_index_offset + ip->prog->num_variables
                  || ix < ip->variable_index_offset
                    )
@@ -2145,6 +2155,7 @@ v_variable_exists (svalue_t *sp, int num_arg)
                 ix -= ip->variable_index_offset;
                 progp = ip->prog;
                 flags = progp->variables[ix].type.t_flags;
+                virtualvar = false;
             }
         }
 
@@ -3459,7 +3470,7 @@ v_replace_program (svalue_t *sp, int num_arg)
     replace_ob_t *tmp;
     program_t *new_prog;  /* the replacing program */
     program_t *curprog;   /* the current program */
-    int offsets[2];       /* the offsets of the replacing prog */
+    int offsets[3];       /* the offsets of the replacing prog */
 
     if (!current_object)
         errorf("replace_program called with no current object\n");
@@ -3517,6 +3528,7 @@ v_replace_program (svalue_t *sp, int num_arg)
         new_prog = curprog->inherit[replace_index].prog;
         offsets[0] = curprog->inherit[replace_index].variable_index_offset;
         offsets[1] = curprog->inherit[replace_index].function_index_offset;
+        offsets[2] = curprog->inherit[replace_index].inherit_type == INHERIT_TYPE_NORMAL;
     }
     else
     {
@@ -3563,6 +3575,7 @@ v_replace_program (svalue_t *sp, int num_arg)
             {
                 new_prog = curprog;
                 offsets[0] = offsets[1] = 0;
+                offsets[2] = 1;
             }
             else
             {
@@ -3619,7 +3632,7 @@ v_replace_program (svalue_t *sp, int num_arg)
 
     tmp->new_prog = new_prog;
     tmp->var_offset = offsets[0];
-    tmp->fun_offset = offsets[1];
+    tmp->fun_offset = offsets[1] + (offsets[2] ? 0 : curprog->num_virtual_variables);
 
     return sp;
 } /* v_replace_program() */
