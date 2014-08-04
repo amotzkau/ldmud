@@ -7385,6 +7385,7 @@ push_control_stack ( svalue_t   *sp
     csp->catch_call = MY_FALSE;
     csp->pc = pc;
     csp->function_index_offset = function_index_offset;
+    csp->variable_index_offset = variable_index_offset;
     csp->current_variables = current_variables;
     csp->break_sp = break_sp;
 #ifdef EVAL_COST_TRACE
@@ -7420,6 +7421,7 @@ pop_control_stack (void)
     inter_context = csp->context;
 #endif /* USE_NEW_INLINES */
     function_index_offset = csp->function_index_offset;
+    variable_index_offset = csp->variable_index_offset;
     current_variables     = csp->current_variables;
     break_sp = csp->break_sp;
     csp--;
@@ -9211,6 +9213,7 @@ again:
         }
 
         function_index_offset = csp->function_index_offset;
+        variable_index_offset = csp->variable_index_offset;
         current_variables     = csp->current_variables;
         break_sp = csp->break_sp;
 #ifdef USE_NEW_INLINES
@@ -14165,7 +14168,7 @@ again:
         flags = setup_new_frame1(
           func_index,
           function_index_offset + inheritp->function_index_offset,
-          inheritp->variable_index_offset
+          variable_index_offset + inheritp->variable_index_offset
         );
         funstart = current_prog->program + (flags & FUNSTART_MASK);
         csp->funstart = funstart;
@@ -14180,7 +14183,9 @@ again:
         /* Finish the setup */
         fp = inter_fp;
         pc = funstart;
-        current_variables += variable_index_offset;
+        current_variables = current_object->variables;
+        if (current_variables)
+            current_variables += variable_index_offset;
         current_strings = current_prog->strings;
         csp->extern_call = MY_FALSE;
         break;
@@ -17433,6 +17438,7 @@ retry_for_shadow:
             current_prog = cache[ix].progp;
             current_strings = current_prog->strings;
             function_index_offset = cache[ix].function_index_offset;
+            variable_index_offset = cache[ix].variable_index_offset;
 #ifdef DEBUG
             if (!ob->variables && cache[ix].variable_index_offset)
                 fatal("%s Fatal: apply (cached) for object %p '%s' "
@@ -17442,7 +17448,7 @@ retry_for_shadow:
 #endif
             current_variables = ob->variables;
             if (current_variables)
-                current_variables += cache[ix].variable_index_offset;
+                current_variables += variable_index_offset;
             inter_sp = setup_new_frame2(funstart, inter_sp, allowRefs, MY_FALSE);
                         
             // check argument types
