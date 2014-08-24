@@ -1354,6 +1354,8 @@ get_f_visibility_buf (typeflags_t flags, char *buf, size_t bufsize)
         strncat(buf, "protected ", bufsize);
     if (flags & TYPE_MOD_PUBLIC)
         strncat(buf, "public ", bufsize);
+    if (flags & TYPE_MOD_VISIBLE)
+        strncat(buf, "visible ", bufsize);
     if (flags & TYPE_MOD_VARARGS)
         strncat(buf, "varargs ", bufsize);
     if (flags & TYPE_MOD_DEPRECATED)
@@ -2433,6 +2435,42 @@ get_flattened_type (lpctype_t* t)
     return result;
 
 } /* check_binary_op_types() */
+
+/*-------------------------------------------------------------------------*/
+static funflag_t
+check_visibility_flags (funflag_t flags, funflag_t default_vis, bool function)
+
+/* Checks the given visibility flags.
+ *
+ * Checks whether only one visibility modifier was given.
+ * If no modifier was given use <default_vis> instead.
+ * TYPE_MOD_VISIBLE will be removed.
+ * If <function> is true, then TYPE_MOD_STATIC is also considered.
+ */
+{
+    funflag_t mask = TYPE_MOD_PRIVATE | TYPE_MOD_PROTECTED | TYPE_MOD_PUBLIC | TYPE_MOD_VISIBLE;
+    int num_modifier = 0;
+
+    if(function)
+        mask |= TYPE_MOD_STATIC;
+
+    for (funflag_t i = 1; i < mask; i <<= 1)
+        if (flags & mask & i)
+            num_modifier++;
+
+    if (num_modifier == 0)
+        flags |= default_vis;
+    else if (num_modifier > 1)
+    {
+        yyerrorf("Multiple visibility modifier given: %s"
+            , get_f_visibility(flags & mask));
+
+        /* Remove them all to avoid confusion till compilation aborts. */
+        flags &= ~mask;
+    }
+
+    return flags & ~TYPE_MOD_VISIBLE;
+} /* check_visibility_flags() */
 
 /*-------------------------------------------------------------------------*/
 static INLINE void
@@ -4413,11 +4451,7 @@ define_global_variable (ident_t* name, fulltype_t actual_type, Bool with_init)
 
     variables_defined = MY_TRUE;
 
-    if (!(actual_type.t_flags & (TYPE_MOD_PRIVATE | TYPE_MOD_PUBLIC
-                          | TYPE_MOD_PROTECTED)))
-    {
-        actual_type.t_flags |= default_varmod;
-    }
+    actual_type.t_flags = check_visibility_flags(actual_type.t_flags, default_varmod, false);
 
     if (actual_type.t_flags & TYPE_MOD_VARARGS)
     {
@@ -4623,11 +4657,7 @@ def_function_typecheck (fulltype_t returntype, ident_t * ident, Bool is_inline)
         init_scope(block_depth);
     }
 
-    if (!(returntype.t_flags & (TYPE_MOD_PRIVATE | TYPE_MOD_PUBLIC
-                                  | TYPE_MOD_PROTECTED | TYPE_MOD_STATIC)))
-    {
-        returntype.t_flags |= default_funmod;
-    }
+    returntype.t_flags = check_visibility_flags(returntype.t_flags, default_funmod, true);
 
     /* Require exact types? */
     exact_types = returntype.t_type;
@@ -4954,6 +4984,17 @@ define_new_struct ( Bool proto, ident_t *p, funflag_t flags)
     }
 
     /* This is a new struct! */
+    flags = check_visibility_flags(flags, 0, false);
+    if (flags & TYPE_MOD_STATIC)
+    {
+        yyerror("Can't declare a struct as static");
+        flags &= ~TYPE_MOD_STATIC;
+    }
+    if (flags & TYPE_MOD_VARARGS)
+    {
+        yyerror("Can't declare a struct as varargs");
+        flags &= ~TYPE_MOD_VARARGS;
+    }
 
     /* Fill in the struct_def_t */
     sdef.type  = struct_new_prototype(ref_mstring(p->name));
@@ -6517,6 +6558,7 @@ delete_prog_string (void)
 %token L_SYMBOL_DECL
 %token L_VARARGS
 %token L_VIRTUAL
+%token L_VISIBLE
 %token L_VOID
 %token L_WHILE
 
@@ -7353,6 +7395,15 @@ inheritance:
               yyerror("illegal to inherit code as 'nosave'");
           }
 
+          if ($1[1] & TYPE_MOD_VARARGS)
+          {
+              $1[1] ^= TYPE_MOD_VARARGS;
+              yyerror("illegal to inherit variables as 'varargs'");
+          }
+
+          $1[0] = check_visibility_flags($1[0], 0, true);
+          $1[1] = check_visibility_flags($1[1], 0, false);
+
           /* First, try to call master->inherit_file().
            * Since simulate::load_object() makes sure that the master has been
            * loaded, this test can only fail when the master is compiled.
@@ -7516,11 +7567,8 @@ inheritance_qualifiers:
            * that we have to prevent the qualifier test in the
            * inheritance rule from triggering.
            */
-          if ($1 & TYPE_MOD_NOSAVE)
-          {
-              $$[0] ^= TYPE_MOD_NOSAVE;
-          }
-
+          $$[0] &= ~TYPE_MOD_NOSAVE;
+          $$[1] &= ~TYPE_MOD_VARARGS;
       }
 
     | inheritance_qualifier inheritance_qualifiers
@@ -7620,29 +7668,29 @@ inheritance_qualifier:
 default_visibility:
     L_DEFAULT inheritance_qualifiers ';'
       {
-          if ($2[0] & ~( TYPE_MOD_PRIVATE | TYPE_MOD_PUBLIC
+          if ($2[0] & ~( TYPE_MOD_PRIVATE | TYPE_MOD_PUBLIC | TYPE_MOD_VISIBLE
                        | TYPE_MOD_PROTECTED | TYPE_MOD_STATIC | TYPE_MOD_DEPRECATED)
              )
           {
               yyerror("Default visibility specification for functions "
-                      "accepts only 'private', 'protected', 'public', "
+                      "accepts only 'private', 'protected', 'visible', 'public', "
                       "'static' or 'deprecated'");
               YYACCEPT;
           }
 
-          if ($2[1] & ~( TYPE_MOD_PRIVATE | TYPE_MOD_PUBLIC
+          if ($2[1] & ~( TYPE_MOD_PRIVATE | TYPE_MOD_PUBLIC | TYPE_MOD_VISIBLE
                        | TYPE_MOD_PROTECTED | TYPE_MOD_DEPRECATED)
              )
           {
               yyerror("Default visibility specification for variables "
-                      "accepts only 'private', 'protected', 'public' "
+                      "accepts only 'private', 'protected', 'visible', 'public' "
                       "or 'deprecated'"
                       );
               YYACCEPT;
           }
 
-          default_funmod = $2[0];
-          default_varmod = $2[1];
+          default_funmod = check_visibility_flags($2[0], 0, true);
+          default_varmod = check_visibility_flags($2[1], 0, false);
       }
 ; /* default_visibility */
 
@@ -7682,7 +7730,8 @@ type_modifier:
     | L_VARARGS    { $$ = TYPE_MOD_VARARGS; }
     | L_PROTECTED  { $$ = TYPE_MOD_PROTECTED; }
     | L_NOSAVE     { $$ = TYPE_MOD_NOSAVE; }
-    | L_DEPRECATED   { $$ = TYPE_MOD_DEPRECATED; }
+    | L_DEPRECATED { $$ = TYPE_MOD_DEPRECATED; }
+    | L_VISIBLE    { $$ = TYPE_MOD_VISIBLE; }
 ;
 
 
@@ -7807,6 +7856,14 @@ argument_list:
 new_arg_name:
       non_void_type L_IDENTIFIER
       {
+          funflag_t illegal_flags = $1.t_flags & (TYPE_MOD_STATIC|TYPE_MOD_NO_MASK|TYPE_MOD_PRIVATE|TYPE_MOD_PUBLIC|TYPE_MOD_VIRTUAL|TYPE_MOD_PROTECTED|TYPE_MOD_NOSAVE|TYPE_MOD_VISIBLE);
+          if (illegal_flags)
+          {
+              yyerrorf("Illegal modifier for function argument: %s"
+                     , get_f_visibility(illegal_flags));
+              $1.t_flags &= ~illegal_flags;
+          }
+
           if (exact_types && !$1.t_type)
           {
               yyerror("Missing type for argument");
@@ -7821,6 +7878,14 @@ new_arg_name:
 
     | non_void_type L_LOCAL
       {
+          funflag_t illegal_flags = $1.t_flags & (TYPE_MOD_STATIC|TYPE_MOD_NO_MASK|TYPE_MOD_PRIVATE|TYPE_MOD_PUBLIC|TYPE_MOD_VIRTUAL|TYPE_MOD_PROTECTED|TYPE_MOD_NOSAVE|TYPE_MOD_VISIBLE);
+          if (illegal_flags)
+          {
+              yyerrorf("Illegal modifier for function argument: %s"
+                     , get_f_visibility(illegal_flags));
+              $1.t_flags &= ~illegal_flags;
+          }
+
           /* A local name is redeclared. */
           if (current_inline == NULL)
           {
@@ -15238,13 +15303,17 @@ copy_structs (program_t *from, funflag_t flags)
         struct_def_t *pdef = from->struct_defs + struct_id;
         funflag_t f;
 
-        f = flags | pdef->flags;
+        /* Combine the visibility flags. */
+        f = flags;
+        if (pdef->flags & TYPE_MOD_PUBLIC)
+            f &= ~(TYPE_MOD_PRIVATE | TYPE_MOD_PROTECTED);
 
-        /* Is this struct visible to us? */
-        if (pdef->flags & (TYPE_MOD_PRIVATE|NAME_HIDDEN))
-        {
-            f |= NAME_HIDDEN;
-        }
+        f |= pdef->flags;
+
+        if (f & (TYPE_MOD_PRIVATE | NAME_HIDDEN))
+            f = (f | NAME_HIDDEN) & ~(TYPE_MOD_PROTECTED | TYPE_MOD_PUBLIC);
+        else if (f & TYPE_MOD_PROTECTED)
+            f &= ~(TYPE_MOD_PUBLIC);
 
         /* Duplicate definition? */
         id = find_struct(struct_t_name(pdef->type));
@@ -15416,7 +15485,7 @@ inherit_variable (variable_t *variable, funflag_t varmodifier)
      * 'private'.
      */
     if (variable->type.t_flags & TYPE_MOD_PUBLIC)
-        new_type &= ~TYPE_MOD_PRIVATE;
+        new_type &= ~(TYPE_MOD_PRIVATE | TYPE_MOD_PROTECTED);
 
     fulltype_t vartype = variable->type;
 
@@ -15425,6 +15494,11 @@ inherit_variable (variable_t *variable, funflag_t varmodifier)
                        ? (NAME_HIDDEN|NAME_INHERITED)
                        :  NAME_INHERITED
                       );
+    /* The most restrictive visibility wins. */
+    if (vartype.t_flags & (TYPE_MOD_PRIVATE | NAME_HIDDEN))
+        vartype.t_flags &= ~(TYPE_MOD_PROTECTED | TYPE_MOD_PUBLIC);
+    else if (vartype.t_flags & TYPE_MOD_PROTECTED)
+        vartype.t_flags &= ~(TYPE_MOD_PUBLIC);
 
     define_variable(p, vartype);
     return true;
@@ -16612,8 +16686,17 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
              */
             funflag_t new_type = funmodifier;
             if (fun.flags & TYPE_MOD_PUBLIC)
-                new_type &= ~(TYPE_MOD_PRIVATE|TYPE_MOD_STATIC);
+                new_type &= ~(TYPE_MOD_PRIVATE | TYPE_MOD_PROTECTED | TYPE_MOD_STATIC);
+
             fun.flags |= new_type;
+
+            /* The most restrictive visibility wins. */
+            if (fun.flags & (TYPE_MOD_PRIVATE | NAME_HIDDEN))
+                fun.flags &= ~(TYPE_MOD_PROTECTED | TYPE_MOD_STATIC | TYPE_MOD_PUBLIC);
+            else if (fun.flags & TYPE_MOD_PROTECTED)
+                fun.flags &= ~(TYPE_MOD_STATIC | TYPE_MOD_PUBLIC);
+            else if (fun.flags & TYPE_MOD_STATIC)
+                fun.flags &= ~(TYPE_MOD_PUBLIC);
 
             /* Recognize an inherited heart_beat(), making it possible
              * to mask it.
@@ -16637,7 +16720,7 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
         fun_p[i] = fun;
     } /* for (inherited functions), pass 2 */
 
-    copy_structs(from, funmodifier);
+    copy_structs(from, funmodifier & ~(TYPE_MOD_STATIC|TYPE_MOD_VIRTUAL));
 
     return initializer;
 
