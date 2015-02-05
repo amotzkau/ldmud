@@ -3849,7 +3849,7 @@ define_new_function ( Bool complete, ident_t *p, int num_arg, int num_local
 
         funp = FUNCTION(num);
 
-        if ((funp->flags & (NAME_INHERITED|TYPE_MOD_PRIVATE|NAME_HIDDEN|NAME_UNDEFINED))
+        if ((funp->flags & (NAME_INHERITED|TYPE_MOD_PRIVATE|NAME_HIDDEN))
          == (NAME_INHERITED|TYPE_MOD_PRIVATE|NAME_HIDDEN))
         {
             break;
