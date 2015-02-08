@@ -3601,7 +3601,7 @@ free_callback_args (callback_t *cb)
         if (cb->arg.type != T_INVALID)
             free_svalue(&(cb->arg));
     }
-    else if (nargs > 1 && !cb->arg.x.extern_args)
+    else if (nargs > 1)
     {
         dest = cb->arg.u.lvalue;
 
@@ -3687,7 +3687,6 @@ setup_callback_args (callback_t *cb, int nargs, svalue_t * args
             xallocate(dest, sizeof(*dest) * nargs, "callback structure");
             cb->arg.type = T_LVALUE;
             cb->arg.u.lvalue = dest;
-            cb->arg.x.extern_args = MY_FALSE;
         }
         else
             dest = &(cb->arg);
@@ -4175,8 +4174,7 @@ clear_ref_in_callback (callback_t *cb)
     else if (cb->num_arg > 1)
     {
         clear_ref_in_vector(cb->arg.u.lvalue, (size_t)cb->num_arg);
-        if (!cb->arg.x.extern_args)
-            clear_memory_reference(cb->arg.u.lvalue);
+        clear_memory_reference(cb->arg.u.lvalue);
     }
 
     if (cb->is_lambda)
@@ -4205,8 +4203,7 @@ count_ref_in_callback (callback_t *cb)
     else if (cb->num_arg > 1)
     {
         count_ref_in_vector(cb->arg.u.lvalue, (size_t)cb->num_arg);
-        if (!cb->arg.x.extern_args)
-            note_malloced_block_ref(cb->arg.u.lvalue);
+        note_malloced_block_ref(cb->arg.u.lvalue);
     }
 
 #ifdef DEBUG
