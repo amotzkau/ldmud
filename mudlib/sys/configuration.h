@@ -10,7 +10,8 @@
 
 /* Possible options for configure_opbject().
  */
-
+#define OC_COMMANDS_ENABLED    0
+#define OC_HEART_BEAT          1
 
 /* Possible options for configure_driver().
  */
