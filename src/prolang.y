@@ -1443,11 +1443,13 @@ get_lpctype_name_buf (lpctype_t *type, char *buf, size_t bufsize)
         {
             if (type->t_struct.name)
             {
-                if(7 + mstrsize(type->t_struct.name->name) < bufsize)
+                size_t len = 7 + mstrsize(type->t_struct.name->name);
+                if(len < bufsize)
                 {
                     memcpy(buf, "struct ", 7);
-                    memcpy(buf+7, get_txt(type->t_struct.name->name), mstrsize(type->t_struct.name->name));
-                    return 7 + mstrsize(type->t_struct.name->name);
+                    memcpy(buf+7, get_txt(type->t_struct.name->name), len-7);
+                    buf[len] = 0;
+                    return len;
                 }
                 else
                 {
@@ -5547,12 +5549,12 @@ get_struct_member_result_type (lpctype_t* structure, string_t* member_name, shor
     while (true)
     {
         /* Let's go through <structure> and see, if there are any structs in it. */
-        lpctype_t *member = head->t_class == TCLASS_UNION ? head->t_union.member : head;
+        lpctype_t *unionmember = head->t_class == TCLASS_UNION ? head->t_union.member : head;
 
-        switch (member->t_class)
+        switch (unionmember->t_class)
         {
         case TCLASS_PRIMARY:
-            switch (member->t_primary)
+            switch (unionmember->t_primary)
             {
             case TYPE_UNKNOWN:
             case TYPE_ANY:
@@ -5587,7 +5589,7 @@ get_struct_member_result_type (lpctype_t* structure, string_t* member_name, shor
 
         case TCLASS_STRUCT:
             {
-                if (structure->t_struct.def == NULL)
+                if (unionmember->t_struct.def == NULL)
                     break;
 
                 int midx = -1;
@@ -5596,14 +5598,14 @@ get_struct_member_result_type (lpctype_t* structure, string_t* member_name, shor
                 if (member_name != NULL)
                 {
                     /* Let's see, if this one has <member>. */
-                    midx = struct_find_member(structure->t_struct.def, member_name);
+                    midx = struct_find_member(unionmember->t_struct.def, member_name);
                     if (midx < 0)
                         break;
                 }
 
                 if (!fstruct)
                 {
-                    fstruct = structure->t_struct.def;
+                    fstruct = unionmember->t_struct.def;
                     *member_index = midx;
                 }
                 else
@@ -5611,7 +5613,7 @@ get_struct_member_result_type (lpctype_t* structure, string_t* member_name, shor
                     struct_type_t* test;
                     /* Is this a child of <fstruct>? Then skip it.*/
 
-                    for ( test = structure->t_struct.def
+                    for ( test = unionmember->t_struct.def
                         ; test != NULL && test != fstruct
                         ; test = test->base
                         )
@@ -5622,7 +5624,7 @@ get_struct_member_result_type (lpctype_t* structure, string_t* member_name, shor
                         /* It's not a child. Check the other way around. */
 
                         for ( test = fstruct
-                            ; test != NULL && test != structure->t_struct.def
+                            ; test != NULL && test != unionmember->t_struct.def
                             ; test = test->base
                             )
                             NOOP;
@@ -5634,7 +5636,7 @@ get_struct_member_result_type (lpctype_t* structure, string_t* member_name, shor
                             yyerrorf("Multiple structs found for member '%s': struct %s, struct %s"
                                     , get_txt(member_name)
                                     , get_txt(struct_t_name(fstruct))
-                                    , get_txt(struct_t_name(structure->t_struct.def))
+                                    , get_txt(struct_t_name(unionmember->t_struct.def))
                                     );
 
                             *struct_index = -1;
@@ -5644,7 +5646,7 @@ get_struct_member_result_type (lpctype_t* structure, string_t* member_name, shor
                         else
                         {
                             /* Remember the base struct. */
-                            fstruct = structure->t_struct.def;
+                            fstruct = unionmember->t_struct.def;
                             *member_index = midx;
                         }
                     }
