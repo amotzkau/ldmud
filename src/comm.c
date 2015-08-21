@@ -724,7 +724,7 @@ comm_fatal (interactive_t *ip, char *fmt, ...)
                      , ts, current_object->name
                            ? get_txt(current_object->name) : "<null>");
     debug_message("%s Dump of the call chain:\n", ts);
-    (void)dump_trace(MY_TRUE, NULL); fflush(stdout);
+    (void)dump_trace(MY_TRUE, NULL, NULL); fflush(stdout);
 
     va_end(va);
 
