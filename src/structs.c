@@ -183,7 +183,7 @@
 #include "wiz_list.h"
 #include "xalloc.h"
 
-#include "../mudlib/sys/debug_info.h"
+#include "../mudlib/sys/driver_info.h"
 #include "../mudlib/sys/struct_info.h"
 
 /*-------------------------------------------------------------------------*/
@@ -1066,28 +1066,37 @@ total_struct_size (strbuf_t *sbuf, Bool verbose)
 
 /*-------------------------------------------------------------------------*/
 void
-struct_dinfo_status (svalue_t *svp, int value)
+struct_driver_info (svalue_t *svp, int value)
 
-/* Return the struct information for debug_info(DINFO_DATA, DID_STATUS).
- * <svp> points to the svalue block for the result, this function fills in
- * the spots for the object table.
- * If <value> is -1, <svp> points indeed to a value block; other it is
- * the index of the desired value and <svp> points to a single svalue.
+/* Returns the struct information for driver_info(<what>).
+ * <svp> points to the svalue for the result.
  */
 
 {
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code
+    switch (value)
+    {
+        case DI_NUM_STRUCTS:
+            put_number(svp, num_struct);
+            break;
 
-    ST_NUMBER(DID_ST_STRUCTS, num_struct);
-    ST_NUMBER(DID_ST_STRUCTS_SIZE, size_struct);
+        case DI_NUM_STRUCT_TYPES:
+            put_number(svp, num_struct_type);
+            break;
 
-    ST_NUMBER(DID_ST_STRUCT_TYPES, num_struct_type);
-    ST_NUMBER(DID_ST_STRUCT_TYPES_SIZE, size_struct_type);
+        case DI_SIZE_STRUCTS:
+            put_number(svp, size_struct);
+            break;
 
-#undef ST_NUMBER
-} /* string_dinfo_status() */
+        case DI_SIZE_STRUCT_TYPES:
+            put_number(svp, size_struct_type);
+            break;
+
+        default:
+            fatal("Unknown option for struct_driver_info(): %d\n", value);
+            break;
+    }
+
+} /* struct_driver_info() */
 
 /*-------------------------------------------------------------------------*/
 string_t *

@@ -84,7 +84,7 @@
 #include "svalue.h"
 #include "xalloc.h"
 
-#include "../mudlib/sys/debug_info.h"
+#include "../mudlib/sys/driver_info.h"
 
 /*=========================================================================*/
 /*                         M E M B U F F E R S                             */
@@ -284,25 +284,29 @@ mb_status (strbuf_t * sbuf, Bool verbose)
 
 /*-------------------------------------------------------------------------*/
 void
-mb_dinfo_status (svalue_t *svp, int value)
+mempools_driver_info (svalue_t *svp, int value)
 
-/* Return the rxcache information for debug_info(DINFO_DATA, DID_STATUS).
- * <svp> points to the svalue block for the result, this function fills in
- * the spots for the object table.
- * If <value> is -1, <svp> points indeed to a value block; other it is
- * the index of the desired value and <svp> points to a single svalue.
+/* Returns the mempool information for driver_info(<what>).
+ * <svp> points to the svalue for the result.
  */
 
 {
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code
+    switch (value)
+    {
+        case DI_SIZE_BUFFER_FILE:
+            put_number(svp, membuffers[mbFile].size);
+            break;
 
-    ST_NUMBER(DID_ST_MB_FILE, membuffers[mbFile].size);
-    ST_NUMBER(DID_ST_MB_SWAP, membuffers[mbSwap].size);
+        case DI_SIZE_BUFFER_SWAP:
+            put_number(svp, membuffers[mbSwap].size);
+            break;
 
-#undef ST_NUMBER
-} /* mb_dinfo_status() */
+        default:
+            fatal("Unknown option for mempools_driver_info(): %d\n", value);
+            break;
+    }
+
+} /* mempools_driver_info() */
 
 /*=========================================================================*/
 /*                           M E M P O O L S                               */

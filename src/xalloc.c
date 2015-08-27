@@ -279,7 +279,7 @@ mdb_log_sbrk (p_int size)
  *
  *   void mem_dump_data (strbuf_t *sbuf)
  *   void mem_dump_extdata (strbuf_t *sbuf)
- *   void mem_dinfo_data (svalue_t *svp, int value)
+ *   void mem_driver_info (svalue_t *svp, int value)
  *     Return the statistics data.
  *
  *   Bool mem_dump_memory (int fd)
@@ -480,7 +480,7 @@ retry_alloc (size_t size MTRACE_DECL)
     max_malloced = 0; /* Disable the checking for a clean exit */
     going_to_exit = MY_TRUE; /* Prevent recursions */
     writes(2, mess4);
-    (void)dump_trace(MY_FALSE, NULL);
+    (void)dump_trace(MY_FALSE, NULL, NULL);
     fatal("Out of memory (%lu bytes)\n", (unsigned long)size);
     /* NOTREACHED */
     return MY_FALSE;
@@ -508,7 +508,7 @@ check_max_malloced (void)
         /* Totally out of memory: exit */
         max_malloced = 0; /* Disable the checking for a clean exit */
         going_to_exit = MY_TRUE; /* Prevent recursions */
-        (void)dump_trace(MY_FALSE, NULL);
+        (void)dump_trace(MY_FALSE, NULL, NULL);
         fatal("Out of memory.\n");
         /* NOTREACHED */
     }

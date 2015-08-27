@@ -417,8 +417,6 @@ extern void  init_telopts(void);
 extern void  mudlib_telopts(void);
 extern svalue_t *v_input_to (svalue_t *sp, int num_arg);
 
-extern svalue_t *f_query_udp_port(svalue_t *sp);
-
 #ifdef ERQ_DEMON
 extern void  start_erq_demon(const char *suffix, size_t suffixlen);
 extern svalue_t *f_attach_erq_demon(svalue_t *sp);
@@ -443,8 +441,6 @@ extern input_t *get_input_handler(interactive_t *ip, input_type_t type);
 
 extern char *query_host_name(void);
 extern char *get_host_ip_number(void);
-extern svalue_t *f_query_snoop(svalue_t *sp);
-extern svalue_t *f_query_idle(svalue_t *sp);
 extern svalue_t *f_remove_interactive(svalue_t *sp);
 
 #ifdef DEBUG
@@ -456,24 +452,11 @@ extern svalue_t *f_send_udp(svalue_t *sp);
 extern svalue_t *f_binary_message(svalue_t *sp);
 extern svalue_t *f_exec(svalue_t *sp);
 extern svalue_t *f_interactive(svalue_t *sp);
-extern svalue_t *f_query_input_pending(svalue_t *sp);
-extern svalue_t *f_query_ip_name(svalue_t *sp);
-extern svalue_t *f_query_ip_number(svalue_t *sp);
-extern svalue_t *f_query_mud_port(svalue_t *sp);
 extern svalue_t *v_find_input_to (svalue_t *sp, int num_arg);
 extern svalue_t *v_remove_input_to (svalue_t *sp, int num_arg);
 extern svalue_t *f_input_to_info (svalue_t *sp);
-extern svalue_t *f_set_buffer_size(svalue_t *sp);
-extern svalue_t *f_get_combine_charset(svalue_t *sp);
-extern svalue_t *f_set_combine_charset(svalue_t *sp);
-extern svalue_t *f_get_connection_charset(svalue_t *sp);
-extern svalue_t *f_set_connection_charset(svalue_t *sp);
-extern svalue_t *f_set_prompt(svalue_t *sp);
 extern svalue_t *v_snoop(svalue_t *sp, int num_arg);
 extern svalue_t *f_users(svalue_t *sp);
-extern svalue_t *f_get_max_commands (svalue_t *sp);
-extern svalue_t *f_set_max_commands (svalue_t *sp);
-extern svalue_t *f_enable_telnet (svalue_t *sp);
 extern svalue_t *f_net_connect (svalue_t *sp);
 extern svalue_t *f_configure_interactive(svalue_t *sp);
 

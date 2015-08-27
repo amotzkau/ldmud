@@ -34,7 +34,6 @@
  *    efun: clones()
  *    efun: object_info()
  *    efun: present_clone()
- *    efun: set_is_wizard() (optional)
  *
  * Values:
  *    efun: abs()
@@ -71,7 +70,6 @@
  *
  * Others:
  *    efun: ctime()
- *    efun: debug_info()
  *    efun: rusage() (optional)
  *    efun: shutdown()
  *    efun: gmtime()
@@ -136,10 +134,10 @@
 
 #include "i-eval_cost.h"
 
-#include "../mudlib/sys/debug_info.h"
 #include "../mudlib/sys/driver_hook.h"
+#include "../mudlib/sys/driver_info.h"
 #include "../mudlib/sys/configuration.h"
-#include "../mudlib/sys/objectinfo.h"
+#include "../mudlib/sys/object_info.h"
 #include "../mudlib/sys/regexp.h"
 #include "../mudlib/sys/strings.h"
 #include "../mudlib/sys/time.h"
@@ -156,12 +154,6 @@ static void copy_svalue (svalue_t *dest, svalue_t *, struct pointer_table *, int
 /* Macros */
 
 /*-------------------------------------------------------------------------*/
-
-#ifdef USE_SET_IS_WIZARD
-Bool is_wizard_used = MY_FALSE;
-  /* TODO: This flag can go when the special commands are gone. */
-#endif
-
 
 /*=========================================================================*/
 /*                              STRINGS                                    */
@@ -4433,288 +4425,407 @@ v_clones (svalue_t *sp, int num_arg)
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
-v_object_info (svalue_t *sp, int num_args)
+f_configure_object (svalue_t *sp)
 
-/* EFUN object_info()
+/* EFUN configure_object()
  *
- *    mixed * object_info(object o, int type)
- *    mixed * object_info(object o, int type, int which)
+ *    void configure_object(object ob, int what, mixed data)
  *
- * Return an array with information about the object <o>. The
- * type of information returned is determined by <type>.
+ * Configures several aspects of the object <ob>, or the default for all objects
+ * if <ob> is 0.
  *
- * If <which> is specified, the function does not return the full array, but
- * just the single value from index <which>.
+ * <what> == OC_...
+ *
+ * If the first argument <ob> is not this_object(), the privilege violation
+ * ("configure_object", this_object(), ob, what, data) occurs.
  */
 
 {
-    vector_t *v;
-    object_t *o, *o2;
-    program_t *prog;
-    svalue_t *svp, *argp;
-    mp_int v0, v1, v2;
-    int flags, pos, value;
+    object_t *ob;
+
+    if (sp[-2].type == T_OBJECT)
+        ob = sp[-2].u.ob;
+    else
+        ob = NULL;
+
+    if ((current_object->flags & O_DESTRUCTED)
+     || (ob != current_object
+      && !privilege_violation_n(STR_CONFIGURE_OBJECT, ob, sp, 2)))
+    {
+        sp = pop_n_elems(3, sp);
+        return sp;
+    }
+
+    switch (sp[-1].u.number)
+    {
+    default:
+        errorf("Illegal value %"PRIdPINT" for configure_object().\n", sp[-1].u.number);
+        return sp; /* NOTREACHED */
+
+    case OC_COMMANDS_ENABLED:
+        if (!ob)
+            errorf("Default value for OC_COMMANDS_ENABLED is not supported.\n");
+        if (sp->type != T_NUMBER)
+            efun_arg_error(2, T_NUMBER, sp->type, sp);
+
+        if (sp->u.number)
+            ob->flags |= O_ENABLE_COMMANDS;
+        else
+            ob->flags &= ~O_ENABLE_COMMANDS;
+        break;
+
+    case OC_HEART_BEAT:
+        if (!ob)
+            errorf("Default value for OC_HEART_BEAT is not supported.\n");
+        if (sp->type != T_NUMBER)
+            efun_arg_error(2, T_NUMBER, sp->type, sp);
+
+        set_heart_beat(ob, sp->u.number != 0);
+        break;
+
+    }
+
+    sp = pop_n_elems(3, sp);
+    return sp;
+} /* f_configure_object() */
+
+/*-------------------------------------------------------------------------*/
+static void
+assert_ob_not_swapped (object_t *ob)
+
+/* Makes sure that <ob> is swapped by swapping in
+ * or throwing an error otherwise.
+ */
+
+{
+    if ((ob->flags & O_SWAPPED) && load_ob_from_swap(ob) < 0)
+        errorf("Out of memory: unswap object '%s'.\n", get_txt(ob->name));
+} /* assert_ob_not_swapped */
+
+/*-------------------------------------------------------------------------*/
+svalue_t *
+f_object_info (svalue_t *sp)
+
+/* EFUN object_info()
+ *
+ *    mixed object_info(object ob, int what)
+ *
+ * Return information about the object <ob>.
+ * <what> can either be a configuration option as given to
+ * configure_object() or one of the OI_xxx options.
+ */
+
+{
+    object_t *ob;
     svalue_t result;
 
-    /* Get the arguments from the stack */
-    argp = sp - num_args + 1;
-    if (num_args == 3)
-    {
-        value = argp[2].u.number;
-        assign_svalue_no_free(&result, &const0);
-    }
+    if (sp[-1].type == T_OBJECT)
+        ob = sp[-1].u.ob;
     else
-        value = -1;
+        ob = NULL;
 
-    o = argp->u.ob;
+    if (!ob && sp[0].u.number < 0)
+        errorf("There is no default value for non-configuration values.\n");
 
-    /* Depending on the <type> argument, determine the
-     * data to return.
-     */
-    switch(argp[1].u.number)
+    switch (sp[0].u.number)
     {
-#define PREP(max) \
-    if (num_args == 2) { \
-        v = allocate_array(max); \
-        if (!v) \
-            errorf("Out of memory: array[%d] for result.\n" \
-                 , max); \
-        svp = v->item; \
-    } else { \
-        v = NULL; \
-        if (value < 0 || value >= max) \
-            errorf("Illegal index for object_info(): %d, " \
-                  "expected 0..%d\n", value, max-1); \
-        svp = &result; \
-    }
-
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code; \
-    else {}
-
-#define ST_DOUBLE(which,code) \
-    if (value == -1) { \
-        svp[which].type = T_FLOAT; \
-        STORE_DOUBLE(svp+which, code); \
-    } else if (value == which) { \
-        svp->type = T_FLOAT; \
-        STORE_DOUBLE(svp, code); \
-    } else {}
-
-#define ST_STRING(which,code) \
-    if (value == -1) { \
-        put_ref_string(svp+which, code); \
-    } else if (value == which) { \
-        put_ref_string(svp, code); \
-    } else {}
-
-#define ST_NOREF_STRING(which,code) \
-    if (value == -1) { \
-        put_string(svp+which, code); \
-    } else if (value == which) { \
-        put_string(svp, code); \
-    } else {}
-
-#define ST_OBJECT(which,code,tag) \
-    if (value == -1) { \
-        put_ref_object(svp+which, code, tag); \
-    } else if (value == which) { \
-        put_ref_object(svp, code, tag); \
-    } else {}
-
     default:
-        errorf("Illegal value %"PRIdPINT" for object_info().\n", sp->u.number);
-        /* NOTREACHED */
-        return sp;
+        errorf("Illegal value %"PRIdPINT" for object_info().\n", sp[0].u.number);
+        return sp; /* NOTREACHED */
 
-    /* --- The basic information from the object structure */
-    case OINFO_BASIC:
-        PREP(OIB_MAX);
+    /* Configuration */
+    case OC_COMMANDS_ENABLED:
+        if (!ob)
+            errorf("Default value for OC_COMMANDS_ENABLED is not supported.\n");
+        put_number(&result, (ob->flags & O_ENABLE_COMMANDS) ? 1 : 0);
+        break;
 
-        flags = o->flags;
+    case OC_HEART_BEAT:
+        if (!ob)
+            errorf("Default value for OC_HEART_BEAT is not supported.\n");
+        put_number(&result, (ob->flags & O_HEART_BEAT) ? 1 : 0);
+        break;
 
-        ST_NUMBER(OIB_HEART_BEAT,        (flags & O_HEART_BEAT) ? 1 : 0);
-#ifdef USE_SET_IS_WIZARD
-        ST_NUMBER(OIB_IS_WIZARD,         (flags & O_IS_WIZARD) ? 1 : 0);
-#else
-        ST_NUMBER(OIB_IS_WIZARD,         0);
-#endif
-        ST_NUMBER(OIB_ENABLE_COMMANDS,   (flags & O_ENABLE_COMMANDS) ? 1 : 0);
-        ST_NUMBER(OIB_CLONE,             (flags & O_CLONE) ? 1 : 0);
-        ST_NUMBER(OIB_DESTRUCTED,        (flags & O_DESTRUCTED) ? 1 : 0);
-        ST_NUMBER(OIB_SWAPPED,           (flags & O_SWAPPED) ? 1 : 0);
-        ST_NUMBER(OIB_ONCE_INTERACTIVE,  (flags & O_ONCE_INTERACTIVE) ? 1 : 0);
-        ST_NUMBER(OIB_RESET_STATE,       (flags & O_RESET_STATE) ? 1 : 0);
-        ST_NUMBER(OIB_WILL_CLEAN_UP,     (flags & O_WILL_CLEAN_UP) ? 1 : 0);
-        ST_NUMBER(OIB_LAMBDA_REFERENCED, (flags & O_LAMBDA_REFERENCED) ? 1 : 0);
-        ST_NUMBER(OIB_SHADOW,            (flags & O_SHADOW) ? 1 : 0);
-        ST_NUMBER(OIB_REPLACED,          (flags & O_REPLACED) ? 1 : 0);
-        ST_NUMBER(OIB_NEXT_RESET,        o->time_reset);
-        ST_NUMBER(OIB_NEXT_CLEANUP,      o->time_cleanup);
-        ST_NUMBER(OIB_TIME_OF_REF,       o->time_of_ref);
-        ST_NUMBER(OIB_REF,               o->ref);
-        ST_NUMBER(OIB_GIGATICKS,         (p_int)o->gigaticks);
-        ST_NUMBER(OIB_TICKS,             (p_int)o->ticks);
-        ST_NUMBER(OIB_SWAP_NUM,          O_SWAP_NUM(o));
-        ST_NUMBER(OIB_PROG_SWAPPED,      O_PROG_SWAPPED(o) ? 1 : 0);
-        ST_NUMBER(OIB_VAR_SWAPPED,       O_VAR_SWAPPED(o) ? 1 : 0);
+    /* Object flags */
+    case OI_ONCE_INTERACTIVE:
+        put_number(&result, (ob->flags & O_ONCE_INTERACTIVE) ? 1 : 0);
+        break;
 
-        if (compat_mode)
-        {
-            ST_STRING(OIB_NAME, o->name);
-        }
+    case OI_RESET_STATE:
+        put_number(&result, (ob->flags & O_RESET_STATE) ? 1 : 0);
+        break;
+
+    case OI_WILL_CLEAN_UP:
+        put_number(&result, (ob->flags & O_WILL_CLEAN_UP) ? 1 : 0);
+        break;
+
+    case OI_LAMBDA_REFERENCED:
+        put_number(&result, (ob->flags & O_LAMBDA_REFERENCED) ? 1 : 0);
+        break;
+
+    case OI_REPLACED:
+        put_number(&result, (ob->flags & O_REPLACED) ? 1 : 0);
+        break;
+
+    /* Program flags */
+    case OI_NO_INHERIT:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (ob->prog->flags & P_NO_INHERIT) ? 1 : 0);
+        break;
+
+    case OI_NO_CLONE:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (ob->prog->flags & P_NO_CLONE) ? 1 : 0);
+        break;
+
+    case OI_NO_SHADOW:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (ob->prog->flags & P_NO_SHADOW) ? 1 : 0);
+        break;
+
+    case OI_SHARE_VARIABLES:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (ob->prog->flags & P_SHARE_VARIABLES) ? 1 : 0);
+        break;
+
+    /* Swapping */
+    case OI_SWAPPED:
+        put_number(&result, (ob->flags & O_SWAPPED) ? 1 : 0);
+        break;
+
+    case OI_PROG_SWAPPED:
+        put_number(&result, O_PROG_SWAPPED(ob) ? 1 : 0);
+        break;
+
+    case OI_VAR_SWAPPED:
+        put_number(&result, O_VAR_SWAPPED(ob) ? 1 : 0);
+        break;
+
+    case OI_SWAP_NUM:
+        put_number(&result, O_SWAP_NUM(ob));
+        break;
+
+    /* Timing */
+    case OI_NEXT_RESET_TIME:
+        put_number(&result, ob->time_reset);
+        break;
+
+    case OI_NEXT_CLEANUP_TIME:
+        put_number(&result, ob->time_cleanup);
+        break;
+
+    case OI_LAST_REF_TIME:
+        put_number(&result, ob->time_of_ref);
+        break;
+
+    /* Object list */
+    case OI_OBJECT_NEXT:
+        if (ob->next_all)
+            put_ref_object(&result, ob->next_all, "object_info(OI_OBJECT_NEXT)");
         else
-        {
-            ST_NOREF_STRING(OIB_NAME, add_slash(o->name));
-        }
-
-        ST_STRING(OIB_LOAD_NAME, o->load_name);
-
-        o2 = o->next_all;
-        if (o2)
-        {
-            ST_OBJECT(OIB_NEXT_ALL, o2, "object_info(0)");
-        } /* else the element was already allocated as 0 */
-
-        o2 = o->prev_all;
-        if (o2)
-        {
-            ST_OBJECT(OIB_PREV_ALL, o2, "object_info(0)");
-        } /* else the element was already allocated as 0 */
-
+            put_number(&result, 0);
         break;
 
-    /* --- Position in the object list */
-    case OINFO_POSITION:
-        PREP(OIP_MAX);
+    case OI_OBJECT_PREV:
+        if (ob->next_all)
+            put_ref_object(&result, ob->prev_all, "object_info(OI_OBJECT_PREV)");
+        else
+            put_number(&result, 0);
+        break;
 
-        o2 = o->next_all;
-        if (o2)
+    case OI_OBJECT_POS:
         {
-            ST_OBJECT(OIP_NEXT, o2, "object_info(1) next");
-        } /* else the element was already allocated as 0 */
+            int pos = 0;
+            object_t *pos_ob = obj_list;
 
-        o2 = o->prev_all;
-        if (o2)
-        {
-            ST_OBJECT(OIP_PREV, o2, "object_info(1) next");
-        } /* else the element was already allocated as 0 */
-
-        if (value == -1 || value == OIP_POS)
-        {
-            /* Find the non-destructed predecessor of the object */
-            if (obj_list == o)
+            for (; pos_ob; pos_ob = pos_ob->next_all)
             {
-                pos = 0;
-            }
-            else
-            for (o2 = obj_list, pos = 0; o2; o2 = o2->next_all)
-            {
-                pos++;
-                if (o2->next_all == o)
+                if (pos_ob == ob)
                     break;
+                pos++;
             }
 
-            if (!o2) /* Not found in the list (this shouldn't happen) */
+            if (!pos_ob)
                 pos = -1;
-
-            ST_NUMBER(OIP_POS, pos);
+            put_number(&result, pos);
+            break;
         }
 
+    /* Shadows */
+    case OI_SHADOW_NEXT:
+        {
+            object_t *sh = (ob->flags & O_SHADOW) ? O_GET_SHADOW(ob)->shadowed_by : NULL;
+            if (sh)
+                put_ref_object(&result, sh, "object_info(OI_SHADOW_NEXT)");
+            else
+                put_number(&result, 0);
+            break;
+        }
+
+    case OI_SHADOW_PREV:
+        {
+            object_t *sh = (ob->flags & O_SHADOW) ? O_GET_SHADOW(ob)->shadowing : NULL;
+            if (sh)
+                put_ref_object(&result, sh, "object_info(OI_SHADOW_PREV)");
+            else
+                put_number(&result, 0);
+            break;
+        }
+
+    case OI_SHADOW_ALL:
+        {
+            int num = 0;
+            object_t *sh = ob;
+            vector_t *vec;
+
+            for(; sh; sh = (sh->flags & O_SHADOW) ? O_GET_SHADOW(sh)->shadowed_by : NULL)
+                num++;
+
+            /* The first object is <ob> itself, so skipping that. */
+            vec = allocate_array(num-1);
+            num = 0;
+            for(sh = ob; sh; sh = (sh->flags & O_SHADOW) ? O_GET_SHADOW(sh)->shadowed_by : NULL)
+            {
+                if(num)
+                    put_ref_object(vec->item + num - 1, sh, "object_info(OI_SHADOW_ALL)");
+                num++;
+            }
+
+            put_array(&result, vec);
+            break;
+        }
+
+    /* Object Statistics */
+    case OI_OBJECT_REFS:
+        put_number(&result, ob->ref);
         break;
 
-    /* --- Memory and program information */
-    case OINFO_MEMORY:
-        PREP(OIM_MAX);
+    case OI_TICKS:
+        put_number(&result, (p_int)ob->ticks);
+        break;
 
-        if ((o->flags & O_SWAPPED) && load_ob_from_swap(o) < 0)
-            errorf("Out of memory: unswap object '%s'.\n", get_txt(o->name));
+    case OI_GIGATICKS:
+        put_number(&result, (p_int)ob->gigaticks);
+        break;
 
-        prog = o->prog;
-
-        ST_NUMBER(OIM_REF, prog->ref);
-
-        ST_STRING(OIM_NAME, prog->name);
-
-        ST_NUMBER(OIM_PROG_SIZE, (long)(PROGRAM_END(*prog) - prog->program));
-
-          /* Program size */
-        ST_NUMBER(OIM_NUM_FUNCTIONS, prog->num_functions);
-        ST_NUMBER(OIM_SIZE_FUNCTIONS
-                 , (p_int)(prog->num_functions * sizeof(uint32)
-                    + prog->num_function_names * sizeof(short)));
-          /* Number of function names and the memory usage */
-        ST_NUMBER(OIM_NUM_VARIABLES, prog->num_variables);
-        ST_NUMBER(OIM_SIZE_VARIABLES
-                 , (p_int)(prog->num_variables * sizeof(variable_t)));
-          /* Number of variables and the memory usage */
-        v1 = program_string_size(prog, &v0, &v2);
-        ST_NUMBER(OIM_NUM_STRINGS, prog->num_strings);
-        ST_NUMBER(OIM_SIZE_STRINGS, (p_int)v0);
-        ST_NUMBER(OIM_SIZE_STRINGS_DATA, v1);
-        ST_NUMBER(OIM_SIZE_STRINGS_TOTAL, v2);
-          /* Number of strings and the memory usage */
-
-        ST_NUMBER(OIM_NUM_INCLUDES, prog->num_includes);
+    case OI_DATA_SIZE:
+    case OI_DATA_SIZE_TOTAL:
         {
-            int i = prog->num_inherited;
+            mp_int totalsize, datasize;
+
+            assert_ob_not_swapped(ob);
+            datasize = data_size(ob, &totalsize);
+
+            put_number(&result, (sp[0].u.number == OI_DATA_SIZE) ? datasize : totalsize);
+            break;
+        }
+
+    /* Program Statistics */
+    case OI_PROG_REFS:
+        assert_ob_not_swapped(ob);
+        put_number(&result, ob->prog->ref);
+        break;
+
+    case OI_NUM_FUNCTIONS:
+        assert_ob_not_swapped(ob);
+        put_number(&result, ob->prog->num_functions);
+        break;
+
+    case OI_NUM_VARIABLES:
+        assert_ob_not_swapped(ob);
+        put_number(&result, ob->prog->num_variables);
+        break;
+
+    case OI_NUM_STRINGS:
+        assert_ob_not_swapped(ob);
+        put_number(&result, ob->prog->num_strings);
+        break;
+
+    case OI_NUM_INHERITED:
+        assert_ob_not_swapped(ob);
+        {
+            /* Need to filter artificial entries. */
+            int i = ob->prog->num_inherited;
             int cnt = 0;
             inherit_t *inheritp;
 
-            for (inheritp = prog->inherit; i--; inheritp++)
+            for (inheritp = ob->prog->inherit; i--; inheritp++)
             {
                 if (inheritp->inherit_type == INHERIT_TYPE_NORMAL
                  || inheritp->inherit_type == INHERIT_TYPE_VIRTUAL
                    )
                     cnt++;
             }
-            ST_NUMBER(OIM_NUM_INHERITED, cnt);
-        }
-        ST_NUMBER(OIM_SIZE_INHERITED
-                 , (p_int)(prog->num_inherited * sizeof(inherit_t)));
-          /* Number of inherites and the memory usage */
-        ST_NUMBER(OIM_TOTAL_SIZE, prog->total_size);
 
-        {
-            mp_int totalsize;
-            mp_int datasize = data_size(o, &totalsize);
-
-            ST_NUMBER(OIM_DATA_SIZE, datasize);
-            ST_NUMBER(OIM_TOTAL_DATA_SIZE, totalsize);
+            put_number(&result, cnt);
+            break;
         }
 
-        ST_NUMBER(OIM_NO_INHERIT, (prog->flags & P_NO_INHERIT) ? 1 : 0);
-        ST_NUMBER(OIM_NO_CLONE, (prog->flags & P_NO_CLONE) ? 1 : 0);
-        ST_NUMBER(OIM_NO_SHADOW, (prog->flags & P_NO_SHADOW) ? 1 : 0);
-        ST_NUMBER(OIM_SHARE_VARIABLES, (prog->flags & P_SHARE_VARIABLES) ? 1 : 0);
+    case OI_NUM_INCLUDED:
+        assert_ob_not_swapped(ob);
+        put_number(&result, ob->prog->num_includes);
         break;
 
-#undef PREP
-#undef ST_NUMBER
-#undef ST_DOUBLE
-#undef ST_STRING
-#undef ST_RSTRING
-#undef ST_OBJECT
+    case OI_SIZE_FUNCTIONS:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (p_int)
+            ( ob->prog->num_functions      * sizeof(*ob->prog->functions)
+            + ob->prog->num_function_names * sizeof(*ob->prog->function_names)));
+        break;
+
+    case OI_SIZE_VARIABLES:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (p_int)
+            ( ob->prog->num_variables      * sizeof(*ob->prog->variables)));
+        break;
+
+    case OI_SIZE_STRINGS:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (p_int)
+            ( ob->prog->num_strings        * sizeof(*ob->prog->strings)));
+        break;
+
+    case OI_SIZE_STRINGS_DATA:
+    case OI_SIZE_STRINGS_DATA_TOTAL:
+        {
+            mp_int size, total, overhead;
+
+            assert_ob_not_swapped(ob);
+            size = program_string_size(ob->prog, &overhead, &total);
+
+            put_number(&result, (sp[0].u.number == OI_SIZE_STRINGS_DATA) ? size : total);
+            break;
+        }
+
+    case OI_SIZE_INHERITED:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (p_int)
+            ( ob->prog->num_inherited      * sizeof(*ob->prog->inherit)));
+        break;
+
+    case OI_SIZE_INCLUDED:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (p_int)
+            ( ob->prog->num_includes       * sizeof(*ob->prog->includes)));
+
+    case OI_PROG_SIZE:
+        assert_ob_not_swapped(ob);
+        put_number(&result, (long)(PROGRAM_END(*ob->prog) - ob->prog->program));
+        break;
+
+    case OI_PROG_SIZE_TOTAL:
+        assert_ob_not_swapped(ob);
+        put_number(&result, ob->prog->total_size);
+        break;
     }
 
-    free_svalue(sp);
-    sp--;
-    free_svalue(sp);
-    if (num_args == 3)
-    {
-        sp--;
-        free_svalue(sp);
-    }
+    sp = pop_n_elems(2, sp);
 
-    /* Assign the result */
-    if (num_args == 2)
-        put_array(sp, v);
-    else
-        transfer_svalue_no_free(sp, &result);
-
+    sp++;
+    *sp = result;
     return sp;
-} /* v_object_info() */
+
+} /* f_object_info() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
@@ -4885,48 +4996,6 @@ v_present_clone (svalue_t *sp, int num_arg)
 
     return sp;
 } /* f_present_clone() */
-
-/*-------------------------------------------------------------------------*/
-#ifdef USE_SET_IS_WIZARD
-
-svalue_t *
-f_set_is_wizard (svalue_t *sp)
-
-/* EFUN set_is_wizard()
- *
- *   int set_is_wizard(object ob, int n)
- *
- * Change object ob's wizardhood flag.  If n is 0, it is cleared, if n is, it
- * is set, if n is -1 the current status is reported. The return value is
- * always the old value of the flag. Using this function sets a flag in the
- * parser, that affects permissions for dumpallobj etc, which are by default
- * free for every user.
- */
-
-{
-    int i;
-    unsigned short *flagp;
-
-    flagp = &sp[-1].u.ob->flags;
-    i = (*flagp & O_IS_WIZARD) != 0;
-
-    switch (sp->u.number)
-    {
-        default:
-            errorf("Bad arg to set_is_wizard(): got %"PRIdPINT
-                   ", expected -1..1\n", sp->u.number);
-            /* NOTREACHED */
-        case  0: *flagp &= ~O_IS_WIZARD; is_wizard_used = MY_TRUE; break;
-        case  1: *flagp |=  O_IS_WIZARD; is_wizard_used = MY_TRUE; break;
-        case -1: break; /* only report status */
-    }
-    sp--;
-    free_object_svalue(sp);
-    put_number(sp, i);
-    return sp;
-} /* f_set_is_wizard() */
-
-#endif /* USE_SET_IS_WIZARD */
 
 /*-------------------------------------------------------------------------*/
 static svalue_t *
@@ -7833,7 +7902,8 @@ f_configure_driver (svalue_t *sp)
 {
 
     // Check for privilege_violation.
-    if (!privilege_violation2(STR_CONFIGURE_DRIVER, sp-1, sp, sp))
+    if ((current_object->flags & O_DESTRUCTED)
+     || !privilege_violation2(STR_CONFIGURE_DRIVER, sp-1, sp, sp))
     {
         return pop_n_elems(2, sp);
     }
@@ -7845,16 +7915,16 @@ f_configure_driver (svalue_t *sp)
             return sp; /* NOTREACHED */
         case DC_MEMORY_LIMIT:
             if (sp->type != T_POINTER)
-                efun_arg_error(1, T_POINTER, sp->type, sp);
+                efun_arg_error(2, T_POINTER, sp->type, sp);
             if (VEC_SIZE(sp->u.vec) != 2)
-                errorf("Bad arg 1 to configure_driver(): Invalid array size %"PRIdPINT
+                errorf("Bad arg 2 to configure_driver(): Invalid array size %"PRIdPINT
                        ", expected 2.\n"
                        , VEC_SIZE(sp->u.vec));
             if (sp->u.vec->item[0].type != T_NUMBER)
-                errorf("Bad arg 1 to configure_driver(): Element 0 is '%s', expected 'int'.\n"
+                errorf("Bad arg 2 to configure_driver(): Element 0 is '%s', expected 'int'.\n"
                        , typename(sp->u.vec->item[0].type));
             if (sp->u.vec->item[1].type != T_NUMBER)
-                errorf("Bad arg 1 to configure_driver(): Element 1 is '%s', expected 'int'.\n"
+                errorf("Bad arg 2 to configure_driver(): Element 1 is '%s', expected 'int'.\n"
                        , typename(sp->u.vec->item[1].type));
             if (!set_memory_limit(MALLOC_SOFT_LIMIT, sp->u.vec->item[0].u.number))
                 errorf("Could not set the soft memory limit (%"PRIdPINT") in configure_driver()\n",
@@ -7866,13 +7936,13 @@ f_configure_driver (svalue_t *sp)
 
         case DC_ENABLE_HEART_BEATS:
             if (sp->type != T_NUMBER)
-                efun_arg_error(1, T_NUMBER, sp->type, sp);
+                efun_arg_error(2, T_NUMBER, sp->type, sp);
             heart_beats_enabled = sp->u.number != 0 ? MY_TRUE : MY_FALSE;
             break;
 
         case DC_LONG_EXEC_TIME:
             if (sp->type != T_NUMBER)
-                efun_arg_error(1, T_NUMBER, sp->type, sp);
+                efun_arg_error(2, T_NUMBER, sp->type, sp);
             if (!set_profiling_time_limit(sp->u.number))
                 errorf("Could not set the profiling time limit for long executions "
                        "(%"PRIdPINT") in configure_driver()\n",
@@ -7881,7 +7951,7 @@ f_configure_driver (svalue_t *sp)
 
         case DC_DATA_CLEAN_TIME:
             if (sp->type != T_NUMBER)
-                efun_arg_error(1, T_NUMBER, sp->type, sp);
+                efun_arg_error(2, T_NUMBER, sp->type, sp);
             if (sp->u.number > 0 && sp->u.number < PINT_MAX/9)
                 time_to_data_cleanup = sp->u.number;
             else
@@ -7893,7 +7963,7 @@ f_configure_driver (svalue_t *sp)
 #ifdef USE_TLS
         case DC_TLS_CERTIFICATE:
             if (sp->type != T_STRING)
-                efun_arg_error(1, T_STRING, sp->type, sp);
+                efun_arg_error(2, T_STRING, sp->type, sp);
             else
             {
                 int len = mstrsize(sp->u.str);
@@ -7948,841 +8018,693 @@ f_configure_driver (svalue_t *sp)
 
             break;
 #endif /* USE_TLS */
+
+        case DC_EXTRA_WIZINFO_SIZE:
+            if (sp->type != T_NUMBER)
+                efun_arg_error(2, T_NUMBER, sp->type, sp);
+            wiz_info_extra_size = sp->u.number;
+            break;
+
+        case DC_DEFAULT_RUNTIME_LIMITS:
+            if (sp->type != T_POINTER)
+                efun_arg_error(2, T_POINTER, sp->type, sp);
+            set_default_limits(sp->u.vec);
+            break;
+
+        case DC_SWAP_COMPACT_MODE:
+            if (sp->type != T_NUMBER)
+                efun_arg_error(2, T_NUMBER, sp->type, sp);
+            swap_compact_mode = (sp->u.number != 0);
+            break;
+
     }
 
     // free arguments
     return pop_n_elems(2, sp);
 } /* f_configure_driver() */
+
 /*-------------------------------------------------------------------------*/
 svalue_t *
-v_debug_info (svalue_t *sp, int num_arg)
+f_driver_info (svalue_t *sp)
 
-/* EFUN debug_info()
+/* EFUN driver_info()
  *
- *   mixed debug_info(int flag)
- *   mixed debug_info(int flag, object obj)
- *   mixed debug_info(int flag, int arg2)
- *   mixed debug_info(int flag, int arg2, int arg3)
+ *   mixed driver_info (int what)
  *
- * Print out some driver internal debug information.
+ * Returns information about the runtime environment.
+ * <what> can either be a configuration option as given to
+ * configure_driver() or one of the following options:
  *
- * DINFO_OBJECT (0): Information like heart_beat, enable_commands etc. of the
- *     specified object will be printed, and 0 returned.
- *
- * DINFO_MEMORY (1): Memory usage information like how many strings,
- *     variables, inherited files, object size etc. will be printed about the
- *     specified object, and 0 returned.
- *
- * DINFO_OBJLIST (2): Objects from the global object list are
- *     returned.  If the optional <arg2> is omitted, the first
- *     element(s) (numbered 0) is returned. If the <arg2> is a
- *     number n, the n'th element(s) of the object list returned. If the
- *     <arg2> is an object, it's successor(s) in the object list is
- *     returned.
- *     The optional <arg3> specifies the maximum number of objects
- *     returned. If it's 0, a single object is returned. If it is
- *     a positive number m, an array with at max 'm' objects is
- *     returned. This way, by passing __INT_MAX__ as <arg3> it is
- *     possible to create an array of all objects in the game
- *     (given a suitable maximum array size).
- *
- * DINFO_MALLOC: Equivalent to typing ``malloc'' at the command line.
- *     No second arg must be given. Returns 0.
- *
- * DINFO_STATUS (4): Collect the status information of the driver.  The
- *     optional second arg can be 0, "tables", "swap", "malloc", "malloc
- *     extstats" or any other argument accepted by the actual driver.  The
- *     result is a printable string with the status information, or 0 if an
- *     invalid argument was given.
- *
- * DINFO_DUMP (5): Dump the information specified by <arg2> into the
- *     filename specified by <arg3>. If <arg3> is omitted, a default file
- *     name is used. The function calls master->valid_write() to check that
- *     it can write the files. The file in question is always written anew.
- *     Result is 1 on success, or 0 if an error occured.
- *
- *     <arg2> == "objects": dump information about all live objects. Default
- *       filename is '/OBJ_DUMP', the valid_write() will read 'objdump' for
- *       the function.
- *
- *     <arg2> == "destructed": dump information about all destructed objects.
- *       Default filename is '/DEST_OBJ_DUMP', the valid_write() will read
- *       'objdump' for the function.
- *
- *     <arg2> == "opcodes": dump the usage statistics of the opcodes. Default
- *       filename is '/OPC_DUMP', the valid_write() will read 'opcdump' for
- *       the function. If the driver is compiled without OPCPROF, this call
- *       will always return 0.
- *
- *     <arg2> == "memory": dump a list of all allocated memory blocks (if
- *       the allocator supports this).
- *       Default filename is '/MEMORY_DUMP', the valid_write()
- *       will read 'memdump' for the function, and the new data
- *       will be appended to the end of the file.
- *
- *       If the allocator doesn't support memory dumps, this call will
- *       always return 0, and nothing will be written.
- *
- *       This works best if the allocator is compiled with
- *       MALLOC_TRACE and/or MALLOC_LPC_TRACE.
- *
- * DINFO_DATA (6): Return raw information about an aspect of
- *     the driver specified by <arg2>. The result of the function
- *     is an array with the information, or 0 for unsupported values
- *     of <arg2>. If <arg3> is given and in the range of array indices for
- *     the given <arg2>, the result will be just the indexed array entry,
- *     but not the full array.
- *
- *     Allowed values for <arg2> are: DID_STATUS, DID_SWAP, DID_MALLOC.
- *
- *     <arg2> == DID_STATUS (0): Returns the "status" and "status tables"
- *        information:
- *
- *        int DID_ST_BOOT_TIME
- *            The time() when the mud was started.
- *
- *        int DID_ST_ACTIONS
- *        int DID_ST_ACTIONS_SIZE
- *            Number and size of allocated actions.
- *
- *        int DID_ST_SHADOWS
- *        int DID_ST_SHADOWS_SIZE
- *            Number and size of allocated shadows.
- *
- *        int DID_ST_OBJECTS
- *            Total number and size of objects.
- *
- *        int DID_ST_OBJECTS_SWAPPED
- *        int DID_ST_OBJECTS_SWAP_SIZE
- *            Number and size of swapped-out object variable blocks.
- *
- *        int DID_ST_OBJECTS_LIST
- *            Number of objects in the object list.
- *
- *        int DID_ST_OBJECTS_NEWLY_DEST
- *            Number of newly destructed objects (ie. objects destructed
- *            in this execution thread).
- *
- *        int DID_ST_OBJECTS_DESTRUCTED
- *            Number of destructed but still referenced objects, not
- *            counting the DID_ST_OBJECTS_NEWLY_DEST.
- *
- *        int DID_ST_OBJECTS_PROCESSED
- *            Number of listed objects processed in the last backend
- *            cycle.
- *
- *        float DID_ST_OBJECTS_AVG_PROC
- *            Average number of objects processed each cycle, expressed
- *            as fraction (0..1.0).
- *
- *        int DID_ST_OTABLE
- *            Number of objects listed in the object table.
- *
- *        int DID_ST_OTABLE_SLOTS
- *            Number of hash slots provided by the object table.
- *
- *        int DID_ST_OTABLE_SIZE
- *            Size occupied by the object table.
- *
- *        int DID_ST_HBEAT_OBJS
- *            Number of objects with a heartbeat.
- *
- *        int DID_ST_HBEAT_CALLS
- *            Number of heart_beats executed so far.
- *
- *        int DID_ST_HBEAT_CALLS_TOTAL
- *            Number of heart_beats calls so far. The difference to
- *            ST_HBEAT_CALLS is that the latter only counts heart beat
- *            calls during which at least one heart beat was actually executed.
- *
- *        int DID_ST_HBEAT_SLOTS
- *        int DID_ST_HBEAT_SIZE
- *            Number of allocated entries in the heart_beat table
- *            and its size.
- *
- *        int DID_ST_HBEAT_PROCESSED
- *            Number of heart_beats called in the last backend cycle.
- *
- *        float DID_ST_HBEAT_AVG_PROC
- *            Average number of heart_beats called each cycle, expressed
- *            as fraction (0..1.0).
- *
- *        int DID_ST_CALLOUTS
- *        int DID_ST_CALLOUT_SIZE
- *            Number and total size of pending call_outs.
- *
- *        int DID_ST_ARRAYS
- *        int DID_ST_ARRAYS_SIZE
- *            Number and size of all arrays.
- *
- *        int DID_ST_MAPPINGS
- *        int DID_ST_MAPPINGS_SIZE
- *            Number and size of all mappings.
- *
- *        int DID_ST_HYBRID_MAPPINGS
- *        int DID_ST_HASH_MAPPINGS
- *            Number of hybrid (hash+condensed) and hash mappings.
- *
- *        int DID_ST_STRUCTS
- *        int DID_ST_STRUCTS_SIZE
- *            Number and size of all struct instances.
- *
- *        int DID_ST_STRUCT_TYPES
- *        int DID_ST_STRUCT_TYPES_SIZE
- *            Number and size of all struct type instances.
- *
- *        int DID_ST_PROGS
- *        int DID_ST_PROGS_SIZE
- *            Number and size of all programs.
- *
- *        int DID_ST_PROGS_SWAPPED
- *        int DID_ST_PROGS_SWAP_SIZE
- *            Number and size of swapped-out programs.
- *
- *        int DID_ST_USER_RESERVE
- *        int DID_ST_MASTER_RESERVE
- *        int DID_ST_SYSTEM_RESERVE
- *            Current sizes of the three memory reserves.
- *
- *        int DID_ST_ADD_MESSAGE
- *        int DID_ST_PACKETS
- *        int DID_ST_PACKET_SIZE
- *            Number of calls to add_message(), number and total size
- *            of sent packets.
- *            If the driver is not compiled with COMM_STAT, all three
- *            values are returned as -1.
- *
- *        int DID_ST_APPLY
- *        int DID_ST_APPLY_HITS
- *            Number of calls to apply_low(), and how many of these
- *            were cache hits.
- *            If the driver is not compiled with APPLY_CACHE_STAT, all two
- *            values are returned as -1.
- *
- *
- *        int DID_ST_STRINGS
- *        int DID_ST_STRING_SIZE
- *            Total number and size of string requests.
- *
- *        int DID_ST_STR_TABLE_SIZE
- *            Size of the string table structure itself.
- *
- *        int DID_ST_STR_OVERHEAD
- *            Size of the overhead per string.
- *
- *        int DID_ST_UNTABLED
- *        int DID_ST_UNTABLED_SIZE
- *            Total number and size of existing untabled strings.
- *
- *        int DID_ST_TABLED
- *        int DID_ST_TABLED_SIZE
- *            Total number and size of existing directly tabled strings.
- *
- *        int DID_ST_STR_CHAINS
- *            Number of hash chains in the string table.
- *
- *        int DID_ST_STR_ADDED
- *            Number of distinct strings added to the table so far.
- *
- *        int DID_ST_STR_DELETED
- *            Number of distinct strings removed from the table so far.
- *
- *        int DID_ST_STR_COLLISIONS
- *            Number of distinct strings added to an existing hash chain
- *            so far.
- *
- *        int DID_ST_STR_SEARCHES
- *        int DID_ST_STR_SEARCHLEN
- *            Number and accumulated length of string searches by address.
- *
- *        int DID_ST_STR_SEARCHES_BYVALUE
- *        int DID_ST_STR_SEARCHLEN_BYVALUE
- *            Number and accumulated length of string searches by value.
- *
- *        int DID_ST_STR_FOUND
- *        int DID_ST_STR_FOUND_BYVALUE
- *            Number of successful searches by address resp. by value.
- *
- *
- *        int DID_ST_RX_CACHED
- *            Number of regular expressions cached.
- *
- *        int DID_ST_RX_TABLE
- *        int DID_ST_RX_TABLE_SIZE
- *            Number of slots in the regexp cache table, and size of the
- *            memory currently held by it and the cached expressions.
- *
- *        int DID_ST_RX_REQUESTS
- *            Number of requests for new regexps.
- *
- *        int DID_ST_RX_REQ_FOUND
- *            Number of requested regexps found in the table.
- *
- *        int DID_ST_RX_REQ_COLL
- *            Number of requested new regexps which collided with
- *            a cached one.
- *
- *        int DID_ST_MB_FILE
- *            The size of the 'File' memory buffer.
- *
- *        int DID_ST_MB_SWAP
- *            The size of the 'Swap' memory buffer.
- *
- *
- *     <arg2> == DID_SWAP (1): Returns the "status swap" information:
- *
- *        int DID_SW_PROGS
- *        int DID_SW_PROG_SIZE
- *            Number and size of swapped-out program blocks.
- *
- *        int DID_SW_PROG_UNSWAPPED
- *        int DID_SW_PROG_U_SIZE
- *            Number and size of unswapped program blocks.
- *
- *        int DID_SW_VARS
- *        int DID_SW_VAR_SIZE
- *            Number and size of swapped-out variable blocks.
- *
- *        int DID_SW_FREE
- *        int DID_SW_FREE_SIZE
- *            Number and size of free blocks in the swap file.
- *
- *        int DID_SW_FILE_SIZE
- *            Size of the swap file.
- *
- *        int DID_SW_REUSED
- *            Total reused space in the swap file.
- *
- *        int DID_SW_SEARCHES
- *        int DID_SW_SEARCH_LEN
- *            Number and total length of searches for block to reuse
- *            in the swap file.
- *
- *        int DID_SW_F_SEARCHES
- *        int DID_SW_F_SEARCH_LEN
- *            Number and total length of searches for a block to free.
- *
- *        int DID_SW_COMPACT
- *            TRUE if the swapper is running in compact mode.
- *
- *        int DID_SW_RECYCLE_FREE
- *            TRUE if the swapper is currently recycling free block.
- *
- *
- *     <arg2> == DID_MEMORY (2): Returns the "status malloc" information:
- *  
- *        string DID_MEM_NAME
- *            The name of the allocator: "sysmalloc", "smalloc",
- *            "slaballoc"
- *  
- *        int DID_MEM_SBRK          (slaballoc, smalloc)
- *        int DID_MEM_SBRK_SIZE     (slaballoc, smalloc)
- *            Number and size of memory blocks requested from the
- *            operating system (non-mmapped memory).
- *  
- *        int DID_MEM_LARGE         (slaballoc, smalloc)
- *        int DID_MEM_LARGE_SIZE    (slaballoc, smalloc)
- *        int DID_MEM_LFREE         (slaballoc, smalloc)
- *        int DID_MEM_LFREE_SIZE    (slaballoc, smalloc)
- *            Number and size of large allocated resp. free blocks.
- *            smalloc: The large allocated blocks include the
- *            small chunk blocks.
- *  
- *        int DID_MEM_LWASTED       (slaballoc, smalloc)
- *        int DID_MEM_LWASTED_SIZE  (slaballoc, smalloc)
- *            Number and size of unusable large memory fragments.
- *  
- *        int DID_MEM_CHUNK         (smalloc)
- *        int DID_MEM_CHUNK_SIZE    (smalloc)
- *            Number and size of small chunk blocks.
- *  
- *        int DID_MEM_SLAB          (slaballoc)
- *        int DID_MEM_SLAB_SIZE     (slaballoc)
- *            Number and size of slabs (including fully free slabs).
- *  
- *        int DID_MEM_SLAB_FREE      (slaballoc)
- *        int DID_MEM_SLAB_FREE_SIZE (slaballoc)
- *            Number and size of free slabs (part of DID_MEM_SLAB).
- *  
- *        int DID_MEM_SMALL         (slaballoc, smalloc)
- *        int DID_MEM_SMALL_SIZE    (slaballoc, smalloc)
- *        int DID_MEM_SFREE         (slaballoc, smalloc)
- *        int DID_MEM_SFREE_SIZE    (slaballoc, smalloc)
- *            Number and size of small allocated resp. free blocks.
- *  
- *        int DID_MEM_SWASTED       (smalloc)
- *        int DID_MEM_SWASTED_SIZE  (smalloc)
- *            Number and size of unusably small memory fragments.
- *  
- *        int DID_MEM_SMALL_OVERHEAD_SIZE  (slaballoc)
- *            Size of the slab management overhead (not including
- *            the overhead incurred by each allocated small block).
- *  
- *        int DID_MEM_MINC_CALLS    (slaballoc, smalloc)
- *        int DID_MEM_MINC_SUCCESS  (slaballoc, smalloc)
- *        int DID_MEM_MINC_SIZE     (slaballoc, smalloc)
- *            Number of calls to malloc_increment(), the number
- *            of successes and the size of memory allocated this
- *            way.
- *  
- *        int DID_MEM_PERM         (slaballoc, smalloc)
- *        int DID_MEM_PERM_SIZE    (slaballoc, smalloc)
- *            Number and size of permanent (non-GCable) allocations.
- *  
- *        int DID_MEM_CLIB         (slaballoc, smalloc)
- *        int DID_MEM_CLIB_SIZE    (slaballoc, smalloc)
- *            Number and size of allocations done through the
- *            clib functions (if supported by the allocator).
- *  
- *        int DID_MEM_OVERHEAD     (slaballoc, smalloc)
- *            Overhead for every allocation.
- *  
- *        int DID_MEM_ALLOCATED    (slaballoc, smalloc)
- *            The amount of memory currently allocated from the
- *            allocator, including the overhead for the allocator.
- *  
- *        int DID_MEM_USED         (slaballoc, smalloc)
- *            The amount of memory currently used for driver data,
- *            excluding the overhead from the allocator.
- *  
- *        int DID_MEM_TOTAL_UNUSED (slaballoc, smalloc)
- *            The amount of memory allocated from the system, but
- *            not used by the driver.
- *  
- *        int DID_MEM_DEFRAG_CALLS       (smalloc)
- *            Total number of calls to defragment_small_lists().
- *   
- *        int DID_MEM_DEFRAG_CALLS_REQ   (smalloc)
- *            Number of calls to defragment_small_lists() with a
- *            desired size.
- *   
- *        int DID_MEM_DEFRAG_REQ_SUCCESS (smalloc)
- *            Number of times, a defragmentation for a desired
- *            size was successful.
- *   
- *        int DID_MEM_BLOCKS_INSPECTED   (smalloc)
- *            Number of blocks inspected during defragmentations.
- *   
- *        int DID_MEM_BLOCKS_MERGED      (smalloc)
- *            Number of blocks merged during defragmentations.
- *   
- *        int DID_MEM_BLOCKS_RESULT      (smalloc)
- *            Number of defragmented blocks (ie. merge results).
- *
-#ifdef USE_AVL_FREELIST
- *        int DID_MEM_AVL_NODES          (slaballoc, smalloc)
- *            Number of AVL nodes used to manage the large free
- *            blocks. This value might go away again.
-#endif
-#ifdef MALLOC_EXT_STATISTICS
- *        mixed * DID_MEM_EXT_STATISTICS (slaballoc, smalloc)
- *            If the driver was compiled with extended smalloc
- *            statistics, they are returned in this entry; if the
- *            driver was compiled without the statistics, 0 is
- *            returned.
- *
- *            This value might go away again.
- *
- *            The array contains NUM+2 entries, where NUM is the
- *            number of distinct small block sizes. Entry [NUM]
- *            describes the statistics of oversized small blocks
- *            (smalloc) resp. for all slabs (slaballoc),
- *            entry [NUM+1] summarizes all large blocks. Each
- *            entry is an array of these fields:
- *
- *              int DID_MEM_ES_MAX_ALLOC:
- *                Max number of allocated blocks of this size.
- *
- *              int DID_MEM_ES_CUR_ALLOC:
- *                Current number of allocated blocks of this size.
- *
- *              int DID_MEM_ES_MAX_FREE:
- *                Max number of allocated blocks of this size.
- *
- *              int DID_MEM_ES_CUR_FREE:
- *                Current number of allocated blocks of this size.
- *
- *              float DID_MEM_ES_AVG_XALLOC:
- *                Number of explicit allocation requests per
- *                second.
- *
- *              float DID_MEM_ES_AVG_XFREE:
- *                Number of explicit deallocation requests per
- *                second.
- *
- *              int DID_MEM_ES_FULL_SLABS:
- *                Number of fully used slabs (slaballoc only).
- *
- *              int DID_MEM_ES_FREE_SLABS:
- *                Number of fully free slabs (slaballoc only).
- *
- *              int DID_MEM_ES_TOTAL_SLABS:
- *                Total number of slabs: partially used, fully used
- *                and fully free (slaballoc only).
- *
- *            The allocation/deallocation-per-second statistics do
- *            not cover internal shuffling of the freelists.
- *
- *            The slab statistics (entry [NUM], slaballoc only)
- *            shows in the AVG statistics the frequence with which 
- *            slabs were allocated from resp. returned to the large
- *            memory pool.
-#endif
- *
- * DINFO_TRACE (7): Return the call stack 'trace' information as specified
- *     by <arg2>. The result of the function is either an array (format
- *     explained below), or a printable string. Omitting <arg2> defaults
- *     to DIT_CURRENT.
- *
- *     <arg2> == DIT_CURRENT (0): Current call trace
- *            == DIT_ERROR   (1): Most recent error call trace (caught or
- *                                uncaught)
- *            == DIT_UNCAUGHT_ERROR (2): Most recent uncaught-error call trace
- *        Return the information in array form.
- *
- *        The error traces are changed only when an appropriate error
- *        occurs; in addition a GC deletes them. After an uncaught
- *        error, both error traces point to the same array (so the '=='
- *        operator holds true).
- *
- *        If the array has just one entry, the trace information is not
- *        available and the one entry is string with the reason.
- *
- *        If the array has more than one entries, the first entry is 0 or the
- *        name of the object with the heartbeat which started the current
- *        thread; all following entries describe the call stack starting with
- *        the topmost function called.
- *
- *        All call entries are arrays themselves with the following elements:
- *
- *        int[TRACE_TYPE]: The type of the call frame:
- *            TRACE_TYPE_SYMBOL (0): a function symbol (shouldn't happen).
- *            TRACE_TYPE_SEFUN  (1): a simul-efun.
- *            TRACE_TYPE_EFUN   (2): an efun closure.
- *            TRACE_TYPE_LAMBDA (3): a lambda closure.
- *            TRACE_TYPE_LFUN   (4): a normal lfun.
- *
- *        mixed[TRACE_NAME]: The 'name' of the called frame:
- *            _TYPE_EFUN:   either the name of the efun, or the code of
- *                          the instruction for operator closures
- *            _TYPE_LAMBDA: the numeric lambda identifier.
- *            _TYPE_LFUN:   the name of the lfun.
- *
- *        string[TRACE_PROGRAM]: The (file)name of the program holding the
- *            code.
- *        string[TRACE_OBJECT]:  The name of the object for which the code
- *                               was executed.
- *        int[TRACE_LOC]:
- *            _TYPE_LAMBDA: current program offset from the start of the
- *                          closure code.
- *            _TYPE_LFUN:   the line number.
- *
- *     <arg2> == DIT_STR_CURRENT (3): Return the information about the current
- *        call trace as printable string.
- *
- * DINFO_EVAL_NUMBER (8): Return the current evaluation number. It's
- *     incremented for each top-level call. Some examples are: commands,
- *     calls to heart_beat, reset, or clean_up, and calls generated by
- *     call_out or input_to.
- *     The counter may overflow.
- *
- * TODO: debug_info() and all associated routines are almost big enough
- * TODO:: to justify a file on their own.
+ * <what> == DI_...
  */
-
 {
-    svalue_t *arg;
-    svalue_t res;
-    object_t *ob;
+    svalue_t result;
+    p_int what = sp->u.number;
 
-    arg = sp-num_arg+1;
-    inter_sp = sp;
+    /* We'll init with 0, because the availability of several
+     * options depends on the compile time configuration.
+     */
+    put_number(&result, 0);
 
-    assign_svalue_no_free(&res, &const0);
-    assign_eval_cost();
-    switch ( arg[0].u.number )
+    switch (what)
     {
-    case DINFO_OBJECT:  /* --- DINFO_OBJECT --- */
-      {
-        /* Give information about an object, deciphering it's flags, nameing
-         * it's position in the list of all objects, total light and all the
-         * stuff that is of interest with respect to look_for_objects_to_swap.
-         */
+        default:
+            errorf("Illegal value %"PRIdPINT" for driver_info().\n", what);
+            return sp; /* NOTREACHED */
 
-        int flags;
-        object_t *prev, *obj2;
-
-        if (num_arg != 2)
-            errorf("bad number of arguments to debug_info\n");
-        if (arg[1].type != T_OBJECT)
-            vefun_arg_error(2, T_OBJECT, arg[1].type, sp);
-        ob = arg[1].u.ob;
-        flags = ob->flags;
-        add_message("O_HEART_BEAT      : %s\n",
-          flags&O_HEART_BEAT      ?"TRUE":"FALSE");
-#ifdef USE_SET_IS_WIZARD
-        add_message("O_IS_WIZARD       : %s\n",
-          flags&O_IS_WIZARD       ?"TRUE":"FALSE");
-#endif
-        add_message("O_ENABLE_COMMANDS : %s\n",
-          flags&O_ENABLE_COMMANDS ?"TRUE":"FALSE");
-        add_message("O_CLONE           : %s\n",
-          flags&O_CLONE           ?"TRUE":"FALSE");
-        add_message("O_DESTRUCTED      : %s\n",
-          flags&O_DESTRUCTED      ?"TRUE":"FALSE");
-        add_message("O_SWAPPED         : %s\n",
-          flags&O_SWAPPED          ?"TRUE":"FALSE");
-        add_message("O_ONCE_INTERACTIVE: %s\n",
-          flags&O_ONCE_INTERACTIVE?"TRUE":"FALSE");
-        add_message("O_RESET_STATE     : %s\n",
-          flags&O_RESET_STATE     ?"TRUE":"FALSE");
-        add_message("O_WILL_CLEAN_UP   : %s\n",
-          flags&O_WILL_CLEAN_UP   ?"TRUE":"FALSE");
-        add_message("O_REPLACED        : %s\n",
-          flags&O_REPLACED        ?"TRUE":"FALSE");
-        add_message("time_reset  : %"PRIdMPINT"\n", ob->time_reset);
-        add_message("time_of_ref : %"PRIdMPINT"\n", ob->time_of_ref);
-        add_message("ref         : %"PRIdPINT"\n", ob->ref);
-#ifdef DEBUG
-        add_message("extra_ref   : %"PRIdPINT"\n", ob->extra_ref);
-#endif
-        if (ob->gigaticks)
-            add_message("evalcost   :  %"PRIuMPINT"%09"PRIuMPINT"\n", 
-                        (mp_uint)ob->gigaticks, (mp_uint)ob->ticks);
-        else
-            add_message("evalcost   :  %"PRIdMPINT"\n", (mp_uint)ob->ticks);
-        add_message("swap_num    : %"PRIdPINT"\n", O_SWAP_NUM(ob));
-        add_message("name        : '%s'\n", get_txt(ob->name));
-        add_message("load_name   : '%s'\n", get_txt(ob->load_name));
-        obj2 = ob->next_all;
-        if (obj2)
-            add_message("next_all    : OBJ(%s)\n",
-              obj2->next_all ? get_txt(obj2->name) : "NULL");
-        prev = ob->prev_all;
-        if (prev) {
-            add_message("Previous object in object list: OBJ(%s)\n"
-                       , get_txt(prev->name));
-        } else
-            add_message("This object is the head of the object list.\n");
-        break;
-      }
-
-    case DINFO_MEMORY:  /* --- DINFO_MEMORY --- */
-      {
-        /* Give information about an object's program with regard to memory
-         * usage. This is meant to point out where memory can be saved in
-         * program structs.
-         */
-
-        program_t *pg;
-        mp_int v0, v1, v2;
-
-        if (num_arg != 2)
-            errorf("bad number of arguments to debug_info\n");
-        if (sp->type != T_OBJECT)
-            vefun_arg_error(2, T_OBJECT, sp->type, sp);
-        if ((sp->u.ob->flags & O_SWAPPED) && load_ob_from_swap(sp->u.ob) < 0)
-            errorf("Out of memory: unswap object '%s'\n", get_txt(sp->u.ob->name));
-        pg = sp->u.ob->prog;
-        add_message("program ref's %3"PRIdPINT"\n", pg->ref);
-        add_message("Name: '%s'\n",                get_txt(pg->name));
-        add_message("program size    %6"PRIuPINT"\n"
-          ,(p_uint)(PROGRAM_END(*pg) - pg->program));
-        add_message("num func's:  %3u (%4"PRIuPINT")\n", 
-                    (unsigned int)pg->num_functions,
-                    (p_uint)(pg->num_functions * sizeof(uint32) +
-                              pg->num_function_names * sizeof(short)));
-        add_message("num vars:    %3u (%4"PRIuPINT")\n", 
-                    (unsigned int)pg->num_variables,
-                    (p_uint)(pg->num_variables * sizeof(variable_t)));
-
-        v1 = program_string_size(pg, &v0, &v2);
-        add_message("num strings: %3u (%4"PRIdMPINT") : overhead %"PRIdMPINT
-                    "+ data %"PRIdMPINT" (%"PRIdMPINT")\n"
-                   , (unsigned int)pg->num_strings
-                   , v0 + v1
-                   , v0
-                   , v1
-                   , v2
-                   );
-
+        case DC_MEMORY_LIMIT:
         {
-            int i = pg->num_inherited;
-            int cnt = 0;
-            inherit_t *inheritp;
+            vector_t *v;
 
-            for (inheritp = pg->inherit; i--; inheritp++)
-            {
-                if (inheritp->inherit_type == INHERIT_TYPE_NORMAL
-                 || inheritp->inherit_type == INHERIT_TYPE_VIRTUAL
-                   )
-                    cnt++;
-            }
-            add_message("num inherits %3d (%4"PRIuPINT")\n", cnt
-                , (p_uint)(pg->num_inherited * sizeof(inherit_t)));
+            memsafe(v = allocate_array(2), sizeof(*v), "result array");
+
+            put_number(v->item,     get_memory_limit(MALLOC_SOFT_LIMIT));
+            put_number(v->item + 1, get_memory_limit(MALLOC_HARD_LIMIT));
+            put_array(&result, v);
+            break;
         }
-        add_message("total size      %6"PRIdPINT"\n"
-          ,pg->total_size);
 
-        v1 = data_size(sp->u.ob, &v2);
-        add_message("data size       %6"PRIdMPINT" (%6"PRIdMPINT")\n",
-                    v1, v2);
-        break;
-      }
+        case DC_ENABLE_HEART_BEATS:
+            put_number(&result, heart_beats_enabled ? 1 : 0);
+            break;
 
-    case DINFO_OBJLIST:  /* --- DINFO_OBJLIST --- */
-      {
-        /* Get the first/next object in the object list */
+        case DC_LONG_EXEC_TIME:
+            put_number(&result, get_profiling_time_limit());
+            break;
 
-        int i, m;
-        ob = obj_list;
-        i = 0;
-        m = 0;
+        case DC_DATA_CLEAN_TIME:
+            put_number(&result, time_to_data_cleanup);
+            break;
 
-        if (num_arg > 2)
+#ifdef USE_TLS
+        case DC_TLS_CERTIFICATE:
         {
-            if (arg[2].type != T_NUMBER)
-                vefun_exp_arg_error(3, (1 << T_NUMBER)
-                                     , arg[2].type, sp);
-            m = arg[2].u.number;
-            if (m < 0)
-                errorf("Bad arg3 to debug_info(DINFO_OBJLIST): %ld, "
-                      "expected a number >= 0.\n"
-                     , (long)m);
-        }
- 
-        if (num_arg > 1)
-        {
-            if (arg[1].type == T_NUMBER)
-            {
-                i = arg[1].u.number;
-            }
+            int len;
+            unsigned char *fp;
+
+            fp = (unsigned char*) tls_get_certificate_fingerprint(&len);
+            if (!fp)
+                put_number(&result, 0);
             else
             {
-                if (arg[1].type != T_OBJECT)
-                    vefun_exp_arg_error(2, (1 << T_OBJECT)|(1 << T_NUMBER)
-                                         , arg[1].type, sp);
-                ob = arg[1].u.ob;
-                i = 1;
+                string_t *str;
+                char * text;
+
+                memsafe(str = alloc_mstring(len*3 - 1), sizeof(*str) + len*3 - 1, "fingerprint");
+                text = get_txt(str);
+
+                for (int pos = 0; pos < len; pos++, fp++, text+=3)
+                {
+                    int b = *fp;
+                    int n1 = b >> 4, n2 = b & 0x0f;
+
+                    text[0] = n1 < 10 ? ('0' + n1) : ('A' + n1 - 10);
+                    text[1] = n2 < 10 ? ('0' + n2) : ('A' + n2 - 10);
+                    if (pos + 1 < len)
+                        text[2] = ':';
+                }
+
+                put_string(&result, str);
             }
+            break;
         }
+#endif /* USE_TLS */
 
-        while (ob && --i >= 0) ob = ob->next_all;
-        if (ob)
+        case DC_EXTRA_WIZINFO_SIZE:
+            put_number(&result, wiz_info_extra_size);
+            break;
+
+        case DC_DEFAULT_RUNTIME_LIMITS:
+            put_limits(&result, true);
+            break;
+
+        case DC_SWAP_COMPACT_MODE:
+            put_number(&result, swap_compact_mode);
+            break;
+
+        /* Driver Environment */
+        case DI_BOOT_TIME:
+            put_number(&result, boot_time);
+            break;
+
+        /* LPC Runtime status */
+        case DI_CURRENT_RUNTIME_LIMITS:
+            put_limits(&result, false);
+            break;
+
+        case DI_EVAL_NUMBER:
+            put_number(&result, eval_number);
+            break;
+
+        /* Network configuration */
+        case DI_MUD_PORTS:
         {
-            if (m < 1)
-                put_ref_object(&res, ob, "debug_info");
-            else
-            {
-                /* Caller expects an array of at max m objects. */
-                object_t * obj_start = ob;
-                size_t len;
-                vector_t * rc;
+            vector_t *v;
+            int i;
 
-                /* First count how many objects we have. */
-                for (len = 0; ob && len < (size_t)m; len++, ob = ob->next_all)
-                    NOOP;
+            memsafe(v = allocate_array(numports), sizeof(*v), "result array");
 
-                rc = allocate_uninit_array(len);
-                if (!rc)
-                    outofmemory("result array");
-
-                /* Now transfer all the objects into the array. */
-                for ( len = 0, ob = obj_start
-                    ; ob && len < (size_t)m
-                    ; len++, ob = ob->next_all)
-                    put_ref_object(rc->item+len, ob, "debug_info");
-
-                put_array(&res, rc);
-            }
+            for (i = 0; i < numports; i++)
+                put_number(v->item + i, port_numbers[i]);
+            put_array(&result, v);
+            break;
         }
-        else if (m > 0)
+
+        case DI_UDP_PORT:
+            put_number(&result, udp_port);
+            break;
+
+        /* Memory management */
+        case DI_MEMORY_RESERVE_USER:
+            put_number(&result, reserved_user_size);
+            break;
+
+        case DI_MEMORY_RESERVE_MASTER:
+            put_number(&result, reserved_master_size);
+            break;
+
+        case DI_MEMORY_RESERVE_SYSTEM:
+            put_number(&result, reserved_system_size);
+            break;
+
+        /* Traces */
+        case DI_TRACE_CURRENT:
         {
-            /* No object found, but caller expects an array */
-            put_array(&res, allocate_array(0));
+            vector_t * vec;
+
+            collect_trace(NULL, &vec);
+            put_array(&result, vec);
+            break;
         }
-        /* else: no object found, and no array expected: just return 0 */
-        break;
-      }
 
-    case DINFO_MALLOC:  /* --- DINFO_MALLOC --- */
-      {
-        /* Print the malloc data */
-        /* TODO: This case can go, DINFO_STATUS "malloc" is sufficient */
+        case DI_TRACE_CURRENT_DEPTH:
+            put_number(&result, control_stack_depth());
+            break;
 
-        strbuf_t sbuf;
+        case DI_TRACE_CURRENT_AS_STRING:
+        {
+            strbuf_t sbuf;
 
-        status_parse(&sbuf, "malloc");
-        strbuf_send(&sbuf);
-        break;
-      }
-
-    case DINFO_STATUS:  /* --- DINFO_STATUS --- */
-      {
-        /* Execute the 'status' command */
-
-        strbuf_t sbuf;
-
-        if (num_arg != 1 && num_arg != 2)
-            errorf("bad number of arguments to debug_info\n");
-        if (num_arg == 1
-         || (sp->type == T_NUMBER && sp->u.number == 0)) {
-            sp->u.str = STR_EMPTY; /* Just for status_parse() */
-        } else {
-            if (arg[1].type != T_STRING)
-                vefun_exp_arg_error(2, (1 << T_STRING)|(1 << T_NULL)
-                                      , arg[1].type, sp);
-        }
-        if (status_parse(&sbuf, get_txt(sp->u.str)))
-            strbuf_store(&sbuf, &res);
-        else
+            strbuf_zero(&sbuf);
+            collect_trace(&sbuf, NULL);
+            put_string(&result, new_mstring(sbuf.buf));
             strbuf_free(&sbuf);
-        break;
-      }
-
-    case DINFO_DUMP:  /* --- DINFO_DUMP --- */
-      {
-        /* Dump information into files */
-
-        string_t * fname;
-
-        if (num_arg != 2 && num_arg != 3)
-            errorf("bad number of arguments to debug_info\n");
-
-        if (arg[1].type != T_STRING)
-            vefun_arg_error(2, T_STRING, arg[1].type, sp);
-        if (num_arg == 2
-         || (sp->type == T_NUMBER && sp->u.number == 0)) {
-            fname = NULL;
-        } else {
-            if (arg[2].type != T_STRING)
-                vefun_exp_arg_error(3, TF_NULL|TF_STRING
-                                     , arg[2].type, sp);
-            fname = sp->u.str;
-        }
-
-        if (mstreq(arg[1].u.str, STR_OBJECTS))
-        {
-            res.u.number = dumpstat(fname ? fname : STR_OBJDUMP_FNAME) ? 1 : 0;
             break;
         }
 
-        if (mstreq(arg[1].u.str, STR_DESTRUCTED))
+        case DI_TRACE_LAST_ERROR:
+            if (current_error_trace)
+                put_ref_array(&result, current_error_trace);
+            else
+                put_number(&result, 0);
+            break;
+
+        case DI_TRACE_LAST_ERROR_AS_STRING:
+            put_ref_string(&result, current_error_trace_string);
+            break;
+
+        case DI_TRACE_LAST_UNCAUGHT_ERROR:
+            if (uncaught_error_trace)
+                put_ref_array(&result, uncaught_error_trace);
+            else
+                put_number(&result, 0);
+            break;
+
+        case DI_TRACE_LAST_UNCAUGHT_ERROR_AS_STRING:
+            put_ref_string(&result, uncaught_error_trace_string);
+            break;
+
+        /* LPC Runtime statistics */
+#ifdef APPLY_CACHE_STAT
+        case DI_NUM_FUNCTION_NAME_CALLS:
+            put_number(&result, apply_cache_hit+apply_cache_miss);
+            break;
+
+        case DI_NUM_FUNCTION_NAME_CALL_HITS:
+            put_number(&result, apply_cache_hit);
+            break;
+
+        case DI_NUM_FUNCTION_NAME_CALL_MISSES:
+            put_number(&result, apply_cache_miss);
+            break;
+#else
+#endif
+
+        case DI_NUM_HEARTBEAT_TOTAL_CYCLES:
+            /* FALLTHROUGH */
+        case DI_NUM_HEARTBEAT_ACTIVE_CYCLES:
+            /* FALLTHROUGH */
+        case DI_NUM_HEARTBEATS_LAST_PROCESSED:
+            hbeat_driver_info(&result, what);
+            break;
+
+        case DI_NUM_STRING_TABLE_STRINGS_ADDED:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_STRINGS_REMOVED:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_LOOKUPS_BY_VALUE:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_LOOKUPS_BY_INDEX:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_LOOKUP_STEPS_BY_VALUE:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_LOOKUP_STEPS_BY_INDEX:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_HITS_BY_VALUE:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_HITS_BY_INDEX:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_COLLISIONS:
+            string_driver_info(&result, what);
+            break;
+
+        case DI_NUM_REGEX_LOOKUPS:
+            /* FALLTHROUGH */
+        case DI_NUM_REGEX_LOOKUP_HITS:
+            /* FALLTHROUGH */
+        case DI_NUM_REGEX_LOOKUP_MISSES:
+            /* FALLTHROUGH */
+        case DI_NUM_REGEX_LOOKUP_COLLISIONS:
+            rxcache_driver_info(&result, what);
+            break;
+
+        /* Network statistics */
+#ifdef COMM_STAT
+        case DI_NUM_MESSAGES_OUT:
+            put_number(&result, add_message_calls);
+            break;
+
+        case DI_NUM_PACKETS_OUT:
+            put_number(&result, inet_packets);
+            break;
+
+        case DI_NUM_PACKETS_IN:
+            put_number(&result, inet_packets_in);
+            break;
+
+        case DI_SIZE_PACKETS_OUT:
+            put_number(&result, inet_volume);
+            break;
+
+        case DI_SIZE_PACKETS_IN:
+            put_number(&result, inet_volume_in);
+            break;
+#endif
+
+        /* Load */
+        case DI_LOAD_AVERAGE_COMMANDS:
+            put_float(&result, stat_load.weighted_avg);
+            break;
+
+        case DI_LOAD_AVERAGE_LINES:
+            put_float(&result, stat_compile.weighted_avg);
+            break;
+
+        case DI_LOAD_AVERAGE_PROCESSED_OBJECTS:
+            put_float(&result, stat_last_processed.weighted_avg);
+            break;
+
+        case DI_LOAD_AVERAGE_PROCESSED_OBJECTS_RELATIVE:
+            put_float(&result, relate_statistics(stat_last_processed, stat_in_list));
+            break;
+
+        case DI_LOAD_AVERAGE_PROCESSED_HEARTBEATS_RELATIVE:
+            hbeat_driver_info(&result, what);
+            break;
+
+        /* Memory use statistics */
+        case DI_NUM_ACTIONS:
+            simulate_driver_info(&result, what);
+            break;
+
+        case DI_NUM_CALLOUTS:
+            callout_driver_info(&result, what);
+            break;
+
+        case DI_NUM_HEARTBEATS:
+            hbeat_driver_info(&result, what);
+            break;
+
+        case DI_NUM_SHADOWS:
+            simulate_driver_info(&result, what);
+            break;
+
+        case DI_NUM_OBJECTS:
+            put_number(&result, tot_alloc_object);
+            break;
+
+        case DI_NUM_OBJECTS_SWAPPED:
+            put_number(&result, num_vb_swapped);
+            break;
+
+        case DI_NUM_OBJECTS_IN_LIST:
+            put_number(&result, num_listed_objs);
+            break;
+
+        case DI_NUM_OBJECTS_IN_TABLE:
+            otable_driver_info(&result, what);
+            break;
+
+        case DI_NUM_OBJECTS_DESTRUCTED:
+            /* FALLTHROUGH */
+        case DI_NUM_OBJECTS_NEWLY_DESTRUCTED:
+            simulate_driver_info(&result, what);
+            break;
+
+        case DI_NUM_OBJECTS_LAST_PROCESSED:
+            put_number(&result, num_last_processed);
+            break;
+
+        case DI_NUM_OBJECT_TABLE_SLOTS:
+            otable_driver_info(&result, what);
+            break;
+
+        case DI_NUM_PROGS:
+            put_number(&result, total_num_prog_blocks + num_swapped - num_unswapped);
+            break;
+
+        case DI_NUM_PROGS_SWAPPED:
+            put_number(&result, num_swapped - num_unswapped);
+            break;
+
+        case DI_NUM_PROGS_UNSWAPPED:
+            put_number(&result, num_unswapped);
+            break;
+
+        case DI_NUM_ARRAYS:
+            put_number(&result, num_arrays);
+            break;
+
+        case DI_NUM_MAPPINGS:
+            put_number(&result, num_mappings);
+            break;
+
+        case DI_NUM_MAPPINGS_CLEAN:
+            put_number(&result, num_mappings - num_hash_mappings - num_dirty_mappings);
+            break;
+
+        case DI_NUM_MAPPINGS_HASH:
+            put_number(&result, num_hash_mappings);
+            break;
+
+        case DI_NUM_MAPPINGS_HYBRID:
+            put_number(&result, num_dirty_mappings);
+            break;
+
+        case DI_NUM_STRUCTS:
+            /* FALLTHROUGH */
+        case DI_NUM_STRUCT_TYPES:
+            struct_driver_info(&result, what);
+            break;
+
+        case DI_NUM_VIRTUAL_STRINGS:
+            /* FALLTHROUGH */
+        case DI_NUM_STRINGS:
+            /* FALLTHROUGH */
+        case DI_NUM_STRINGS_TABLED:
+            /* FALLTHROUGH */
+        case DI_NUM_STRINGS_UNTABLED:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_SLOTS:
+            /* FALLTHROUGH */
+        case DI_NUM_STRING_TABLE_SLOTS_USED:
+            string_driver_info(&result, what);
+            break;
+
+        case DI_NUM_REGEX:
+            /* FALLTHROUGH */
+        case DI_NUM_REGEX_TABLE_SLOTS:
+            rxcache_driver_info(&result, what);
+            break;
+
+
+        case DI_SIZE_ACTIONS:
+            simulate_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_CALLOUTS:
+            callout_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_HEARTBEATS:
+            hbeat_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_SHADOWS:
+            simulate_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_OBJECTS:
+            put_number(&result, tot_alloc_object_size);
+            break;
+
+        case DI_SIZE_OBJECTS_SWAPPED:
+            put_number(&result, total_vb_bytes_swapped);
+            break;
+
+        case DI_SIZE_OBJECT_TABLE:
+            otable_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_PROGS:
+            put_number(&result, total_prog_block_size + total_bytes_swapped - total_bytes_unswapped);
+            break;
+
+        case DI_SIZE_PROGS_SWAPPED:
+            put_number(&result, total_bytes_swapped - total_bytes_unswapped);
+            break;
+
+        case DI_SIZE_PROGS_UNSWAPPED:
+            put_number(&result, total_bytes_unswapped);
+            break;
+
+        case DI_SIZE_ARRAYS:
+            put_number(&result, total_array_size());
+            break;
+
+        case DI_SIZE_MAPPINGS:
+            put_number(&result, total_mapping_size());
+            break;
+
+        case DI_SIZE_STRUCTS:
+            /* FALLTHROUGH */
+        case DI_SIZE_STRUCT_TYPES:
+            struct_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_STRINGS:
+            /* FALLTHROUGH */
+        case DI_SIZE_STRINGS_TABLED:
+            /* FALLTHROUGH */
+        case DI_SIZE_STRINGS_UNTABLED:
+            /* FALLTHROUGH */
+        case DI_SIZE_STRING_TABLE:
+            /* FALLTHROUGH */
+        case DI_SIZE_STRING_OVERHEAD:
+            string_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_REGEX:
+            rxcache_driver_info(&result, what);
+            break;
+
+        case DI_SIZE_BUFFER_FILE:
+            /* FALLTHROUGH */
+        case DI_SIZE_BUFFER_SWAP:
+            mempools_driver_info(&result, what);
+            break;
+
+
+        /* Memory swapper statistics */
+        case DI_NUM_SWAP_BLOCKS:
+            /* FALLTHROUGH */
+        case DI_NUM_SWAP_BLOCKS_FREE:
+            /* FALLTHROUGH */
+        case DI_NUM_SWAP_BLOCKS_REUSE_LOOKUPS:
+            /* FALLTHROUGH */
+        case DI_NUM_SWAP_BLOCKS_REUSE_LOOKUP_STEPS:
+            /* FALLTHROUGH */
+        case DI_NUM_SWAP_BLOCKS_FREE_LOOKUPS:
+            /* FALLTHROUGH */
+        case DI_NUM_SWAP_BLOCKS_FREE_LOOKUP_STEPS:
+            /* FALLTHROUGH */
+        case DI_SIZE_SWAP_BLOCKS:
+            /* FALLTHROUGH */
+        case DI_SIZE_SWAP_BLOCKS_FREE:
+            /* FALLTHROUGH */
+        case DI_SIZE_SWAP_BLOCKS_REUSED:
+            /* FALLTHROUGH */
+        case DI_SWAP_RECYCLE_PHASE:
+            swap_driver_info(&result, what);
+            break;
+
+
+        /* Memory allocator statistics */
+        case DI_MEMORY_ALLOCATOR_NAME:
+            /* FALLTHROUGH */
+
+        case DI_NUM_SYS_ALLOCATED_BLOCKS:
+        case DI_NUM_LARGE_BLOCKS_ALLOCATED:
+        case DI_NUM_LARGE_BLOCKS_FREE:
+        case DI_NUM_LARGE_BLOCKS_WASTE:
+        case DI_NUM_SMALL_BLOCKS_ALLOCATED:
+        case DI_NUM_SMALL_BLOCKS_FREE:
+        case DI_NUM_SMALL_BLOCKS_WASTE:
+        case DI_NUM_SMALL_BLOCK_CHUNKS:
+        case DI_NUM_UNMANAGED_BLOCKS:
+        case DI_NUM_FREE_BLOCKS_AVL_NODES:
+            /* FALLTHROUGH */
+
+        case DI_SIZE_SYS_ALLOCATED_BLOCKS:
+        case DI_SIZE_LARGE_BLOCKS_ALLOCATED:
+        case DI_SIZE_LARGE_BLOCKS_FREE:
+        case DI_SIZE_LARGE_BLOCKS_WASTE:
+        case DI_SIZE_LARGE_BLOCK_OVERHEAD:
+        case DI_SIZE_SMALL_BLOCKS_ALLOCATED:
+        case DI_SIZE_SMALL_BLOCKS_FREE:
+        case DI_SIZE_SMALL_BLOCKS_WASTE:
+        case DI_SIZE_SMALL_BLOCK_OVERHEAD:
+        case DI_SIZE_SMALL_BLOCK_CHUNKS:
+        case DI_SIZE_UNMANAGED_BLOCKS:
+        case DI_SIZE_MEMORY_USED:
+        case DI_SIZE_MEMORY_UNUSED:
+        case DI_SIZE_MEMORY_OVERHEAD:
+            /* FALLTHROUGH */
+
+        case DI_NUM_INCREMENT_SIZE_CALLS:
+        case DI_NUM_INCREMENT_SIZE_CALL_SUCCESSES:
+        case DI_SIZE_INCREMENT_SIZE_CALL_DIFFS:
+        case DI_NUM_REPLACEMENT_MALLOC_CALLS:
+        case DI_SIZE_REPLACEMENT_MALLOC_CALLS:
+        case DI_NUM_MEMORY_DEFRAGMENTATION_CALLS_FULL:
+        case DI_NUM_MEMORY_DEFRAGMENTATION_CALLS_TARGETED:
+        case DI_NUM_MEMORY_DEFRAGMENTATION_CALL_TARGET_HITS:
+        case DI_NUM_MEMORY_DEFRAGMENTATION_BLOCKS_INSPECTED:
+        case DI_NUM_MEMORY_DEFRAGMENTATION_BLOCKS_MERGED:
+        case DI_NUM_MEMORY_DEFRAGMENTATION_BLOCKS_RESULTING:
+            /* FALLTHROUGH */
+
+        case DI_MEMORY_EXTENDED_STATISTICS:
+            mem_driver_info(&result, what);
+            break;
+
+        /* Status texts */
+        case DI_STATUS_TEXT_MEMORY:
         {
-            res.u.number = dumpstat_dest(fname ? fname : STR_DESTOBJDUMP_FNAME) ? 1 : 0;
+            strbuf_t sbuf;
+            if (status_parse(&sbuf, ""))
+                strbuf_store(&sbuf, &result);
+            else
+            {
+                strbuf_free(&sbuf);
+                put_number(&result, 0);
+            }
             break;
         }
 
-        if (mstreq(arg[1].u.str, STR_OPCODES))
+        case DI_STATUS_TEXT_TABLES:
         {
+            strbuf_t sbuf;
+            if (status_parse(&sbuf, "tables"))
+                strbuf_store(&sbuf, &result);
+            else
+            {
+                strbuf_free(&sbuf);
+                put_number(&result, 0);
+            }
+            break;
+        }
+
+        case DI_STATUS_TEXT_SWAP:
+        {
+            strbuf_t sbuf;
+            if (status_parse(&sbuf, "swap"))
+                strbuf_store(&sbuf, &result);
+            else
+            {
+                strbuf_free(&sbuf);
+                put_number(&result, 0);
+            }
+            break;
+        }
+
+        case DI_STATUS_TEXT_MALLOC:
+        {
+            strbuf_t sbuf;
+            if (status_parse(&sbuf, "malloc"))
+                strbuf_store(&sbuf, &result);
+            else
+            {
+                strbuf_free(&sbuf);
+                put_number(&result, 0);
+            }
+            break;
+        }
+
+        case DI_STATUS_TEXT_MALLOC_EXTENDED:
+        {
+            strbuf_t sbuf;
+            if (status_parse(&sbuf, "malloc extstats"))
+                strbuf_store(&sbuf, &result);
+            else
+            {
+                strbuf_free(&sbuf);
+                put_number(&result, 0);
+            }
+            break;
+        }
+    }
+
+    /* Clean up the stack and return the result */
+    free_svalue(sp);
+
+    *sp = result;
+    return sp;
+} /* f_driver_info */
+
+/*-------------------------------------------------------------------------*/
+svalue_t *
+f_dump_driver_info (svalue_t *sp)
+
+/* EFUN dump_driver_info()
+ *
+ *   int dump_driver_info(int what [, string filename])
+ *
+ * Dumps runtime information in <file>. Returns 1 on success, 0 otherwise.
+ */
+{
+    bool success;
+    string_t * fname;
+
+    if (sp[0].type == T_STRING)
+        fname = sp[0].u.str;
+    else
+        fname = NULL;
+
+    switch (sp[-1].u.number)
+    {
+        default:
+            errorf("Illegal value %"PRIdPINT" for dump_driver_info().\n", sp[-1].u.number);
+            return sp; /* NOTREACHED */
+
+        case DDI_OBJECTS:
+            success = dumpstat(fname ? fname : STR_OBJDUMP_FNAME);
+            break;
+
+        case DDI_OBJECTS_DESTRUCTED:
+            success = dumpstat_dest(fname ? fname : STR_DESTOBJDUMP_FNAME);
+            break;
+
+        case DDI_OPCODES:
 #ifdef OPCPROF
-            res.u.number = opcdump(fname ? fname : STR_OPCDUMP) ? 1 : 0;
+            success = opcdump(fname ? fname : STR_OPCDUMP);
+#else
+            success = false;
 #endif
             break;
-        }
 
-        if (mstreq(arg[1].u.str, STR_MEMORY))
-        {
+        case DDI_MEMORY:
+            success = false;
             if (mem_dump_memory(-1))
             {
                 int fd;
@@ -8802,7 +8724,7 @@ v_debug_info (svalue_t *sp, int num_arg)
                         writes(fd, "------------------------------------"
                                    "--------------\n");
                         dprintf1(fd, "Date: %s\n", (p_int)time_stamp());
-                        res.u.number = mem_dump_memory(fd) ? 1 : 0;
+                        success = mem_dump_memory(fd);
                         writes(fd, "\n");
                         close(fd);
                     }
@@ -8811,178 +8733,110 @@ v_debug_info (svalue_t *sp, int num_arg)
                 }
             }
             break;
-        }
-
-        errorf("Bad argument '%s' to debug_info(DINFO_DUMP).\n", get_txt(arg[1].u.str));
-        break;
-      }
-
-    case DINFO_DATA:  /* --- DINFO_DATA --- */
-      {
-        /* Return information about the one or other driver interna.
-         * This is basically the same information returned by DINFO_STATUS,
-         * just not pre-processed into nice strings.
-         */
-
-        vector_t *v;
-        svalue_t *dinfo_arg;
-        int       value = -1;
-
-        if (num_arg != 2 && num_arg != 3)
-            errorf("bad number of arguments to debug_info\n");
-        if (arg[1].type != T_NUMBER)
-            vefun_arg_error(2, T_NUMBER, arg[1].type, sp);
-        if (num_arg == 3)
-        {
-            if (arg[2].type != T_NUMBER)
-                vefun_arg_error(3, T_NUMBER, arg[2].type, sp);
-            value = arg[2].u.number;
-        }
-
-        switch(arg[1].u.number)
-        {
-#define PREP(which) \
-            if (value == -1) { \
-                v = allocate_array(which); \
-                if (!v) \
-                    errorf("Out of memory: array[%d] for result.\n" \
-                         , which); \
-                dinfo_arg = v->item; \
-            } else { \
-                v = NULL; \
-                if (value < 0 || value >= which) \
-                    errorf("Illegal index for debug_info(): %d, " \
-                          "expected 0..%d\n", value, which-1); \
-                dinfo_arg = &res; \
-            }
-
-        case DID_STATUS:
-#define ST_NUMBER(which,code) \
-    if (value == -1) dinfo_arg[which].u.number = code; \
-    else if (value == which) dinfo_arg->u.number = code
-
-            PREP(DID_STATUS_MAX)
-
-            ST_NUMBER(DID_ST_BOOT_TIME, boot_time);
-            dinfo_data_status(dinfo_arg, value);
-            otable_dinfo_status(dinfo_arg, value);
-            hbeat_dinfo_status(dinfo_arg, value);
-            callout_dinfo_status(dinfo_arg, value);
-            string_dinfo_status(dinfo_arg, value);
-            struct_dinfo_status(dinfo_arg, value);
-            rxcache_dinfo_status(dinfo_arg, value);
-            mb_dinfo_status(dinfo_arg, value);
-
-            if (value == -1)
-                put_array(&res, v);
-            break;
-#undef ST_NUMBER
-
-        case DID_SWAP:
-            PREP(DID_SWAP_MAX)
-
-            swap_dinfo_data(dinfo_arg, value);
-            if (value == -1)
-                put_array(&res, v);
-            break;
-
-        case DID_MEMORY:
-            PREP(DID_MEMORY_MAX)
-
-            mem_dinfo_data(dinfo_arg, value);
-            if (value == -1)
-                put_array(&res, v);
-            break;
-
-#undef PREP
-        }
-        break;
-      }
-
-    case DINFO_TRACE:  /* --- DINFO_TRACE --- */
-      {
-        /* Return the trace information */
-
-        if (num_arg != 1 && num_arg != 2)
-            errorf("bad number of arguments to debug_info\n");
-
-        if (num_arg == 2 && sp->type != T_NUMBER)
-            errorf("bad arg 2 to debug_info(): not a number.\n");
-
-        if (num_arg == 1 || sp->u.number == DIT_CURRENT)
-        {
-            vector_t * vec;
-
-            (void)collect_trace(NULL, &vec);
-            put_array(&res, vec);
-        }
-        else if (sp->u.number == DIT_ERROR)
-        {
-            if (current_error_trace)
-                put_ref_array(&res, current_error_trace);
-            else
-            {
-                vector_t *vec;
-
-                vec = allocate_uninit_array(1);
-                put_ref_string(vec->item, STR_NO_TRACE);
-                put_array(&res, vec);
-            }
-        }
-        else if (sp->u.number == DIT_UNCAUGHT_ERROR)
-        {
-            if (uncaught_error_trace)
-                put_ref_array(&res, uncaught_error_trace);
-            else
-            {
-                vector_t *vec;
-
-                vec = allocate_uninit_array(1);
-                put_ref_string(vec->item, STR_NO_TRACE);
-                put_array(&res, vec);
-            }
-        }
-        else if (sp->u.number == DIT_STR_CURRENT)
-        {
-            strbuf_t sbuf;
-
-            strbuf_zero(&sbuf);
-            (void)collect_trace(&sbuf, NULL);
-            put_string(&res, new_mstring(sbuf.buf));
-            strbuf_free(&sbuf);
-        }
-        else if (sp->u.number == DIT_CURRENT_DEPTH)
-        {
-            put_number(&res, control_stack_depth());
-        }
-        else
-            errorf("bad arg 2 to debug_info(): %"PRIdPINT", expected 0..2\n"
-                 , sp->u.number);
-        break;
-      }
-
-    case DINFO_EVAL_NUMBER:
-        /* return current eval number */
-        if (num_arg != 1)
-            errorf("bad number of arguments to debug_info\n");
-        put_number(&res, eval_number);
-        break;
-
-    default:
-        errorf("Bad debug_info() request value: %"PRIdPINT"\n", 
-               arg[0].u.number);
-        /* NOTREACHED */
-        break;
     }
 
-    /* Clean up the stack and return the result */
+    sp = pop_n_elems(2, sp);
+    push_number(sp, success ? 1 : 0);
+    return sp;
+
+} /* f_dump_driver_info */
+
+/*-------------------------------------------------------------------------*/
+svalue_t *
+v_objects (svalue_t *sp, int num_arg)
+
+/* EFUN objects()
+ *
+ *   object* objects(int pos = 0, int num = __INT_MAX__)
+ *   object* objects(object prev_ob, int num = __INT_MAX__)
+ *
+ * Returns an array of objects from the global object list.
+ * The first form will return the objects starting with position <pos>
+ * in the object list. The second form will start with the object
+ * following <prev_ob>. Both will return at most <num> objects
+ * (given a suitable maximum array size).
+ *
+ */
+
+{
+    svalue_t *arg;
+    object_t *ob, *firstob;
+    vector_t *vec;
+    svalue_t *svp;
+    mp_int num, count;
+
+    arg = sp-num_arg+1;
+    inter_sp = sp;
+
+    if (num_arg > 2)
+        errorf("Too many arguments to objects()\n");
+
+    /* Get the starting object (that is to be included in the result). */
+    if (num_arg == 0)
+        ob = obj_list;
+    else if (arg[0].type == T_OBJECT)
+        ob = arg[0].u.ob->next_all;
+    else if (arg[0].type == T_NUMBER)
+    {
+        p_int i;
+
+        ob = obj_list;
+        i = arg[0].u.number;
+
+        if (i < 0)
+            errorf("Bad arg 1 to objects(): %"PRIdPINT", expected a number >= 0.\n"
+                 , i);
+
+        while (ob && --i >= 0) ob = ob->next_all;
+    }
+    else
+        vefun_exp_arg_error(1, TF_NUMBER | TF_OBJECT, arg[0].type, sp);
+
+    /* Get the number of objects in the result array. */
+    if (num_arg != 2)
+        num = PINT_MAX;
+    else if (arg[1].type == T_NUMBER)
+    {
+        num = arg[1].u.number;
+
+        if (num <= 0)
+            errorf("Bad arg 2 to objects(): %"PRIdMPINT", expected a number > 0.\n"
+                 , num);
+    }
+    else
+        vefun_exp_arg_error(2, TF_NUMBER, arg[1].type, sp);
+
+    /* First count how many objects that will be. */
+    count = 0;
+    firstob = ob;
+
+    while (ob && count < num)
+    {
+        ob = ob->next_all;
+        count++;
+    }
+
+    /* Now let's get to it. */
+    memsafe(vec = allocate_uninit_array(count), sizeof(*vec) + (count-1) * sizeof(*vec->item), "objects");
+
+    count = 0;
+    ob = firstob;
+    svp = vec->item;
+
+    while (ob && count < num)
+    {
+        put_ref_object(svp, ob, "objects");
+
+        ob = ob->next_all;
+        count++;
+        svp++;
+    }
 
     sp = pop_n_elems(num_arg, sp);
-
-    sp++;
-    *sp = res;
+    push_array(sp, vec);
     return sp;
-} /* v_debug_info() */
+
+} /* v_objects */
 
 /*-------------------------------------------------------------------------*/
 static INLINE svalue_t *

@@ -72,8 +72,8 @@
 
 #include "i-eval_cost.h"
 
-#include "../mudlib/sys/debug_info.h"
 #include "../mudlib/sys/driver_hook.h"
+#include "../mudlib/sys/driver_info.h"
 #include "../mudlib/sys/files.h"
 #include "../mudlib/sys/regexp.h"
 #include "../mudlib/sys/rtlimits.h"
@@ -265,8 +265,10 @@ mp_int    current_error_line_number;
 
 vector_t *uncaught_error_trace = NULL;
 vector_t *current_error_trace = NULL;
+string_t *uncaught_error_trace_string = NULL;
+string_t *current_error_trace_string = NULL;
   /* When an error occured, these variables hold the call chain in the
-   * format used by efun debug_info() for evaluation by the mudlib.
+   * format used by efun driver_info() for evaluation by the mudlib.
    * The variables are kept until the next error, or until a GC.
    * 'uncaught_error_trace': the most recent uncaught error
    * 'current_error_trace': the most recent error, caught or uncaught.
@@ -650,7 +652,7 @@ fatal (const char *fmt, ...)
                      , ts, current_object->name
                            ? get_txt(current_object->name) : "<null>");
     debug_message("%s Dump of the call chain:\n", ts);
-    (void)dump_trace(MY_TRUE, NULL);
+    (void)dump_trace(MY_TRUE, NULL, NULL);
     printf("%s LDMud aborting on fatal error.\n", time_stamp());
     fflush(stdout);
 
@@ -864,21 +866,36 @@ errorf (const char *fmt, ...)
                     free_array(current_error_trace);
                     current_error_trace = NULL;
                 }
-                object_name = dump_trace(MY_FALSE, &current_error_trace);
+                if (current_error_trace_string)
+                {
+                    free_mstring(current_error_trace_string);
+                    current_error_trace_string = NULL;
+                }
+                object_name = dump_trace(MY_FALSE, &current_error_trace, &current_error_trace_string);
                 debug_message("%s ... execution continues.\n", ts);
                 printf("%s ... execution continues.\n", ts);
             }
             else
             {
                 /* No dump of the backtrace into the log, but we want it
-                 * available for debug_info().
+                 * available for driver_info().
                  */
+                strbuf_t sbuf;
+
                 if (current_error_trace)
                 {
                     free_array(current_error_trace);
                     current_error_trace = NULL;
                 }
-                object_name = collect_trace(NULL, &current_error_trace);
+                if (current_error_trace_string)
+                {
+                    free_mstring(current_error_trace_string);
+                    current_error_trace_string = NULL;
+                }
+                strbuf_zero(&sbuf);
+                object_name = collect_trace(&sbuf, &current_error_trace);
+                current_error_trace_string = new_mstring(sbuf.buf);
+                strbuf_free(&sbuf);
             }
         }
         else /* We're running low on memory. */
@@ -887,6 +904,11 @@ errorf (const char *fmt, ...)
             {
                 free_array(current_error_trace);
                 current_error_trace = NULL;
+            }
+            if (current_error_trace_string)
+            {
+                free_mstring(current_error_trace_string);
+                current_error_trace_string = NULL;
             }
             object_name = STR_UNKNOWN_OBJECT;
         }
@@ -957,15 +979,28 @@ errorf (const char *fmt, ...)
             free_array(uncaught_error_trace);
             uncaught_error_trace = NULL;
         }
+        if (uncaught_error_trace_string)
+        {
+            free_mstring(uncaught_error_trace_string);
+            uncaught_error_trace_string = NULL;
+        }
         if (current_error_trace)
         {
             free_array(current_error_trace);
             current_error_trace = NULL;
         }
+        if (current_error_trace_string)
+        {
+            free_mstring(current_error_trace_string);
+            current_error_trace_string = NULL;
+        }
 
-        object_name = dump_trace(num_error == 3, &current_error_trace);
+        object_name = dump_trace(num_error == 3, &current_error_trace, &current_error_trace_string);
         if (!published_catch)
+        {
             uncaught_error_trace = ref_array(current_error_trace);
+            uncaught_error_trace_string = ref_mstring(current_error_trace_string);
+        }
         fflush(stdout);
     }
 
@@ -1000,10 +1035,20 @@ errorf (const char *fmt, ...)
                 free_array(current_error_trace);
                 current_error_trace = NULL;
             }
+            if (current_error_trace_string)
+            {
+                free_mstring(current_error_trace_string);
+                current_error_trace_string = NULL;
+            }
             if (uncaught_error_trace)
             {
                 free_array(uncaught_error_trace);
                 uncaught_error_trace = NULL;
+            }
+            if (uncaught_error_trace_string)
+            {
+                free_mstring(uncaught_error_trace_string);
+                uncaught_error_trace_string = NULL;
             }
         }
         unroll_context_stack();
@@ -3149,7 +3194,7 @@ status_parse (strbuf_t * sbuf, char * buff)
  * Return TRUE if the request was recognised, and FALSE otherwise.
  *
  * The function is called from actions:special_parse() to implement
- * the hardcoded commands, and from the efun debug_info().
+ * the hardcoded commands, and from the efun driver_info().
  */
 
 {
@@ -3201,7 +3246,7 @@ status_parse (strbuf_t * sbuf, char * buff)
             strbuf_addf(sbuf, "Memory reserved:\t\t\t %9zu\n", res);
         }
         if (verbose) {
-/* TODO: Add these numbers to the debug_info statistics. */
+/* TODO: Add these numbers to the driver_info statistics. */
             strbuf_add(sbuf, "\nVM Execution:\n");
             strbuf_add(sbuf,   "-------------\n");
             strbuf_addf(sbuf
@@ -3383,89 +3428,45 @@ status_parse (strbuf_t * sbuf, char * buff)
 
 /*-------------------------------------------------------------------------*/
 void
-dinfo_data_status (svalue_t *svp, int value)
+simulate_driver_info (svalue_t *svp, int value)
 
-/* Fill in the "status" data for debug_info(DINFO_DATA, DID_STATUS)
- * into the svalue-block <svp>.
- * If <value> is -1, <svp> points indeed to a value block; other it is
- * the index of the desired value and <svp> points to a single svalue.
+/* Returns the vm information for driver_info(<what>).
+ * <svp> points to the svalue for the result.
  */
 
 {
-    STORE_DOUBLE_USED;
+    switch (value)
+    {
+        case DI_NUM_ACTIONS:
+            put_number(svp, alloc_action_sent);
+            break;
 
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code
+        case DI_NUM_SHADOWS:
+            put_number(svp, alloc_shadow_sent);
+            break;
 
-#define ST_DOUBLE(which,code) \
-    if (value == -1) { \
-        svp[which].type = T_FLOAT; \
-        STORE_DOUBLE(svp+which, code); \
-    } else if (value == which) { \
-        svp->type = T_FLOAT; \
-        STORE_DOUBLE(svp, code); \
+        case DI_SIZE_ACTIONS:
+            put_number(svp, alloc_action_sent * sizeof(action_t));
+            break;
+
+        case DI_SIZE_SHADOWS:
+            put_number(svp, alloc_shadow_sent * sizeof (shadow_t));
+            break;
+
+        case DI_NUM_OBJECTS_DESTRUCTED:
+            put_number(svp, num_destructed);
+            break;
+
+        case DI_NUM_OBJECTS_NEWLY_DESTRUCTED:
+            put_number(svp, num_newly_destructed);
+            break;
+
+        default:
+            fatal("Unknown option for simulate_driver_info(): %d\n", value);
+            break;
     }
 
-    ST_NUMBER(DID_ST_ACTIONS,           alloc_action_sent);
-    ST_NUMBER(DID_ST_ACTIONS_SIZE,      alloc_action_sent * sizeof (action_t));
-    ST_NUMBER(DID_ST_SHADOWS,           alloc_shadow_sent);
-    ST_NUMBER(DID_ST_SHADOWS_SIZE,      alloc_shadow_sent * sizeof (shadow_t));
-
-    ST_NUMBER(DID_ST_OBJECTS,           tot_alloc_object);
-    ST_NUMBER(DID_ST_OBJECTS_SIZE,      tot_alloc_object_size);
-    ST_NUMBER(DID_ST_OBJECTS_SWAPPED,   num_vb_swapped);
-    ST_NUMBER(DID_ST_OBJECTS_SWAP_SIZE, total_vb_bytes_swapped);
-    ST_NUMBER(DID_ST_OBJECTS_LIST,      num_listed_objs);
-    ST_NUMBER(DID_ST_OBJECTS_NEWLY_DEST, num_newly_destructed);
-    ST_NUMBER(DID_ST_OBJECTS_DESTRUCTED, num_destructed);
-    ST_NUMBER(DID_ST_OBJECTS_PROCESSED, num_last_processed);
-    ST_DOUBLE(DID_ST_OBJECTS_AVG_PROC, relate_statistics(stat_last_processed, stat_in_list));
-    /* TODO: Maybe add number of objects data cleaned here as well. */
-
-    ST_NUMBER(DID_ST_ARRAYS,         num_arrays);
-    ST_NUMBER(DID_ST_ARRAYS_SIZE,    total_array_size());
-
-    ST_NUMBER(DID_ST_MAPPINGS,       num_mappings);
-    ST_NUMBER(DID_ST_MAPPINGS_SIZE,  total_mapping_size());
-    ST_NUMBER(DID_ST_HYBRID_MAPPINGS, num_dirty_mappings);
-    ST_NUMBER(DID_ST_HASH_MAPPINGS,   num_hash_mappings);
-
-    ST_NUMBER(DID_ST_PROGS,          total_num_prog_blocks + num_swapped
-                                                           - num_unswapped);
-    ST_NUMBER(DID_ST_PROGS_SIZE,     total_prog_block_size + total_bytes_swapped
-                                                           - total_bytes_unswapped);
-    ST_NUMBER(DID_ST_PROGS_SWAPPED,   num_swapped - num_unswapped);
-    ST_NUMBER(DID_ST_PROGS_SWAP_SIZE, total_bytes_swapped - total_bytes_unswapped);
-
-    ST_NUMBER(DID_ST_USER_RESERVE,   reserved_user_size);
-    ST_NUMBER(DID_ST_MASTER_RESERVE, reserved_master_size);
-    ST_NUMBER(DID_ST_SYSTEM_RESERVE, reserved_system_size);
-
-#ifdef COMM_STAT
-    ST_NUMBER(DID_ST_ADD_MESSAGE, add_message_calls);
-    ST_NUMBER(DID_ST_PACKETS,     inet_packets);
-    ST_NUMBER(DID_ST_PACKET_SIZE, inet_volume);
-    ST_NUMBER(DID_ST_PACKETS_IN,     inet_packets_in);
-    ST_NUMBER(DID_ST_PACKET_SIZE_IN, inet_volume_in);
-#else
-    ST_NUMBER(DID_ST_ADD_MESSAGE, -1);
-    ST_NUMBER(DID_ST_PACKETS,     -1);
-    ST_NUMBER(DID_ST_PACKET_SIZE, -1);
-    ST_NUMBER(DID_ST_PACKETS_IN,     -1);
-    ST_NUMBER(DID_ST_PACKET_SIZE_IN, -1);
-#endif
-#ifdef APPLY_CACHE_STAT
-    ST_NUMBER(DID_ST_APPLY,      apply_cache_hit+apply_cache_miss);
-    ST_NUMBER(DID_ST_APPLY_HITS, apply_cache_hit);
-#else
-    ST_NUMBER(DID_ST_APPLY,      -1);
-    ST_NUMBER(DID_ST_APPLY_HITS, -1);
-#endif
-
-#undef ST_NUMBER
-#undef ST_DOUBLE
-} /* dinfo_data_status() */
+} /* simulate_driver_info() */
 
 /*-------------------------------------------------------------------------*/
 string_t *
@@ -4603,12 +4604,11 @@ f_shadow (svalue_t *sp)
 
 /* EFUN shadow()
  *
- *   object shadow(object ob, int flag)
+ *   object shadow(object ob)
  *
- * If flag is non-zero then the current object will shadow ob. If
- * flag is 0 then either 0 will be returned or the object that is
- * shadowing ob.
- * 	
+ * The current_object will shadow ob. This efun
+ * returns 1 on success, 1 otherwise.
+ *
  * The calling object must be permitted by the master object to
  * do the shadowing. In most installations, an object that
  * defines the function query_prevent_shadow() to return 1
@@ -4635,20 +4635,8 @@ f_shadow (svalue_t *sp)
     object_t *ob;
 
     /* Get the arguments */
-    sp--;
     ob = sp->u.ob;
     deref_object(ob, "shadow");
-
-    if (sp[1].u.number == 0)
-    {
-        /* Just look for a possible shadow */
-        ob = (ob->flags & O_SHADOW) ? O_GET_SHADOW(ob)->shadowed_by : NULL;
-        if (ob)
-            sp->u.ob = ref_object(ob, "shadow");
-        else
-            put_number(sp, 0);
-        return sp;
-    }
 
     sp->type = T_NUMBER; /* validate_shadowing might destruct ob */
     assign_eval_cost();
@@ -4677,7 +4665,7 @@ f_shadow (svalue_t *sp)
 
         co_shadow_sent->shadowing = ob;
         shadow_sent->shadowed_by = current_object;
-        put_ref_object(sp, ob, "shadow");
+        put_number(sp, 1);
         return sp;
     }
 
@@ -4685,33 +4673,6 @@ f_shadow (svalue_t *sp)
     put_number(sp, 0);
     return sp;
 } /* f_shadow() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_shadowing (svalue_t *sp)
-
-/* EFUN query_shadowing()
- *
- *   object query_shadowing (object obj)
- *
- * The function returns the object which <obj> is currently
- * shadowing, or 0 if <obj> is not a shadow.
- */
-
-{
-
-    object_t *ob;
-
-    ob = sp->u.ob;
-    deref_object(ob, "shadow");
-    ob = (ob->flags & O_SHADOW) ? O_GET_SHADOW(ob)->shadowing : NULL;
-    if (ob)
-        sp->u.ob = ref_object(ob, "shadow");
-    else
-        put_number(sp, 0);
-
-    return sp;
-} /* f_query_shadowing() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
@@ -5086,12 +5047,14 @@ extract_limits ( struct limits_context_s * result
                , svalue_t *svp
                , int  num
                , Bool tagged
+               , Bool defaults
                )
 
 /* Extract the user-given runtime limits from <svp>...
  * and store them into <result>. If <tagged> is FALSE, <svp> points to an array
  * with the <num> values stored at the proper indices, otherwise <svp> points
- * to a series of <num>/2 (tag, value) pairs.
+ * to a series of <num>/2 (tag, value) pairs. If <defaults> is FALSE, the current
+ * runtime limits are used as the base, otherwise the default values.
  *
  * If the function encounters illegal limit tags or values, it throws
  * an error.
@@ -5099,15 +5062,30 @@ extract_limits ( struct limits_context_s * result
 
 {
     /* Set the defaults (unchanged) limits */
-    result->max_eval = max_eval_cost;
-    result->max_array = max_array_size;
-    result->max_mapping = max_mapping_size;
-    result->max_map_keys = max_mapping_keys;
-    result->max_callouts = max_callouts;
-    result->max_byte = max_byte_xfer;
-    result->max_file = max_file_xfer;
-    result->max_memory = max_memory;
-    result->use_cost = 0;
+    if (defaults)
+    {
+        result->max_eval = def_eval_cost;
+        result->max_array = def_array_size;
+        result->max_mapping = def_mapping_size;
+        result->max_map_keys = def_mapping_keys;
+        result->max_callouts = def_callouts;
+        result->max_byte = def_byte_xfer;
+        result->max_file = def_file_xfer;
+        result->max_memory = def_memory;
+        result->use_cost = DEF_USE_EVAL_COST;
+    }
+    else
+    {
+        result->max_eval = max_eval_cost;
+        result->max_array = max_array_size;
+        result->max_mapping = max_mapping_size;
+        result->max_map_keys = max_mapping_keys;
+        result->max_callouts = max_callouts;
+        result->max_byte = max_byte_xfer;
+        result->max_file = max_file_xfer;
+        result->max_memory = max_memory;
+        result->use_cost = 0;
+    }
 
     if (!tagged)
     {
@@ -5222,12 +5200,12 @@ v_limited (svalue_t * sp, int num_arg)
     {
         extract_limits(&limits, argp[1].u.vec->item
                       , (int)VEC_SIZE(argp[1].u.vec)
-                      , MY_FALSE);
+                      , MY_FALSE, MY_FALSE);
         cl_args = num_arg - 2;
     }
     else if (num_arg % 2 == 1)
     {
-        extract_limits(&limits, argp+1, num_arg-1, MY_TRUE);
+        extract_limits(&limits, argp+1, num_arg-1, MY_TRUE, MY_FALSE);
         cl_args = 0;
     }
     else
@@ -5320,94 +5298,41 @@ v_limited (svalue_t * sp, int num_arg)
 } /* v_limited() */
 
 /*-------------------------------------------------------------------------*/
-svalue_t *
-v_set_limits (svalue_t * sp, int num_arg)
+void
+set_default_limits (vector_t* vec)
 
-/* EFUN set_limits()
- *
- *   void set_limits(int tag, int value, ...)
- *   void set_limits(int * limits)
- *
- * Set the default runtime limits from the given arguments. The new limits
- * will be in effect for the next execution thread.
- *
- * The arguments can be given in two ways: as an array (like the one
- * returned from query_limits(), or as a list of tagged values.
- * The limit settings recognize three special values:
+/* Extract the default limits from an integer array <vec> with an
+ * entry for each limit. The entry can be a positive number
+ * or one of three special values:
  *     LIMIT_UNLIMITED: the limit is deactivated
  *     LIMIT_DEFAULT:   the global setting is used.
  *     LIMIT_KEEP:      the former setting is kept
- *
- * The efun causes a privilege violation ("set_limits", current_object, first
- * arg).
  */
 
 {
-    svalue_t *argp;
     struct limits_context_s limits;
-    vector_t *vec;
 
-    if (!num_arg)
-        errorf("No arguments given.\n");
+    extract_limits(&limits, vec->item, (int)VEC_SIZE(vec), MY_FALSE, MY_TRUE);
 
-    argp = sp - num_arg + 1;
+    /* Now store the parsed limits into the variables */
+    def_eval_cost = limits.max_eval;
+    def_array_size = limits.max_array;
+    def_mapping_size = limits.max_mapping;
+    def_mapping_keys = limits.max_map_keys;
+    def_byte_xfer = limits.max_byte;
+    def_file_xfer = limits.max_file;
+    def_callouts = limits.max_callouts;
+    def_memory = limits.max_memory;
 
-    if (num_arg == 1 && argp->type == T_POINTER && VEC_SIZE(argp->u.vec) < INT_MAX)
-        extract_limits(&limits, argp->u.vec->item, (int)VEC_SIZE(argp->u.vec)
-                      , MY_FALSE);
-    else if (num_arg % 2 == 0)
-        extract_limits(&limits, argp, num_arg, MY_TRUE);
-    else
-    {
-        errorf("set_limits(): Invalid limit specification.\n");
-        /* NOTREACHED */
-        return sp;
-    }
-
-    /* On the stack, create an array with the parsed limits to pass
-     * to privilege violation.
-     */
-    sp = pop_n_elems(num_arg, sp); /* sp == argp now */
-    vec = create_limits_array(&limits);
-    if (!vec)
-    {
-        inter_sp = sp;
-        errorf("(set_limits) Out of memory: array[%d] for call.\n"
-             , LIMIT_MAX);
-        /* NOTREACHED */
-        return sp;
-    }
-    push_array(sp, vec);
-    num_arg = 1;
-
-    if (privilege_violation(STR_SET_LIMITS, argp, sp))
-    {
-        /* Now store the parsed limits into the variables */
-        def_eval_cost = limits.max_eval;
-        def_array_size = limits.max_array;
-        def_mapping_size = limits.max_mapping;
-        def_mapping_keys = limits.max_map_keys;
-        def_byte_xfer = limits.max_byte;
-        def_file_xfer = limits.max_file;
-        def_callouts = limits.max_callouts;
-        def_memory = limits.max_memory;
-    }
-
-    sp = pop_n_elems(num_arg, sp);
-    return sp;
-} /* v_set_limits() */
+} /* set_default_limits() */
 
 /*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_limits (svalue_t * sp)
+void
+put_limits (svalue_t* svp, bool def)
 
-/* EFUN query_limits()
- *
- *   int * query_limits(int defaults)
- *
- * Return an array with the current runtime limits, resp. if defaults
- * is true, the default runtime limits. The entries in the returned
- * array are:
+/* Write an array with the current runtime limits, resp. if <def>
+ * is true, the default runtime limits into <svp>. *<svp> shall be
+ * empty when called. The entries in the array are:
  *
  *   int[LIMIT_EVAL]:    the max number of eval costs
  *   int[LIMIT_ARRAY]:   the max number of array entries
@@ -5423,9 +5348,6 @@ f_query_limits (svalue_t * sp)
 
 {
     vector_t *vec;
-    Bool def;
-
-    def = sp->u.number != 0;
 
     vec = allocate_uninit_array(LIMIT_MAX);
     if (!vec)
@@ -5433,7 +5355,6 @@ f_query_limits (svalue_t * sp)
         errorf("(query_limits) Out of memory: array[%d] for result.\n"
              , LIMIT_MAX);
         /* NOTREACHED */
-        return sp;
     }
 
     put_number(vec->item+LIMIT_EVAL,     def ? def_eval_cost : max_eval_cost);
@@ -5448,10 +5369,9 @@ f_query_limits (svalue_t * sp)
     put_number(vec->item+LIMIT_COST,     def ? DEF_USE_EVAL_COST : use_eval_cost);
     put_number(vec->item+LIMIT_MEMORY,   def ? def_memory : max_memory);
 
-    /* No free_svalue: sp is a number */
-    put_array(sp, vec);
-    return sp;
-} /* f_query_limits() */
+    /* No free_svalue: sp is empty */
+    put_array(svp, vec);
+} /* query_limits() */
 
 /***************************************************************************/
 

@@ -57,8 +57,8 @@
 #include "svalue.h"
 #include "xalloc.h"
 
-#include "../mudlib/sys/debug_info.h"
 #include "../mudlib/sys/driver_hook.h"
+#include "../mudlib/sys/driver_info.h"
 #include "../mudlib/sys/regexp.h"
 
 /*--------------------------------------------------------------------*/
@@ -1250,32 +1250,50 @@ rxcache_status (strbuf_t *sbuf, Bool verbose)
 
 /*-------------------------------------------------------------------------*/
 void
-rxcache_dinfo_status (svalue_t *svp, int value)
+rxcache_driver_info (svalue_t *svp, int value)
 
-/* Return the rxcache information for debug_info(DINFO_DATA, DID_STATUS).
- * <svp> points to the svalue block for the result, this function fills in
- * the spots for the object table.
- * If <value> is -1, <svp> points indeed to a value block; other it is
- * the index of the desired value and <svp> points to a single svalue.
+/* Returns the regex cache information for driver_info(<what>).
+ * <svp> points to the svalue for the result.
  */
 
 {
 #ifdef RXCACHE_TABLE
+    switch (value)
+    {
+        case DI_NUM_REGEX_LOOKUPS:
+            put_number(svp, iNumXRequests);
+            break;
 
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code
+        case DI_NUM_REGEX_LOOKUP_HITS:
+            put_number(svp, iNumXFound);
+            break;
 
-    ST_NUMBER(DID_ST_RX_CACHED, iNumXEntries);
-    ST_NUMBER(DID_ST_RX_TABLE, RXCACHE_TABLE);
-    ST_NUMBER(DID_ST_RX_TABLE_SIZE, iXSizeAlloc);
-    ST_NUMBER(DID_ST_RX_REQUESTS, iNumXRequests);
-    ST_NUMBER(DID_ST_RX_REQ_FOUND, iNumXFound);
-    ST_NUMBER(DID_ST_RX_REQ_COLL, iNumXCollisions);
+        case DI_NUM_REGEX_LOOKUP_MISSES:
+            put_number(svp, iNumXRequests - iNumXFound);
+            break;
 
-#undef ST_NUMBER
+        case DI_NUM_REGEX_LOOKUP_COLLISIONS:
+            put_number(svp, iNumXCollisions);
+            break;
+
+        case DI_NUM_REGEX:
+            put_number(svp, iNumXEntries);
+            break;
+
+        case DI_NUM_REGEX_TABLE_SLOTS:
+            put_number(svp, RXCACHE_TABLE);
+            break;
+
+        case DI_SIZE_REGEX:
+            put_number(svp, iXSizeAlloc);
+            break;
+
+        default:
+            fatal("Unknown option for rxcache_driver_info(): %d\n", value);
+            break;
+    }
 #endif
-} /* rxcache_dinfo_status() */
+} /* rxcache_driver_info() */
 
 /*--------------------------------------------------------------------*/
 #if defined(GC_SUPPORT)

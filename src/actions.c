@@ -612,91 +612,6 @@ call_modify_command (char *buff)
 } /* call_modify_command() */
 
 /*-------------------------------------------------------------------------*/
-static int
-special_parse (char *buff)
-
-/* Implement a few hardcoded commands. Return TRUE if such a command
- * was given.
- * TODO: Remove this feature.
- */
-
-{
-#ifdef USE_SET_IS_WIZARD
-    if (!is_wizard_used || command_giver->flags & O_IS_WIZARD)
-#endif
-    {
-        Bool no_curobj = MY_FALSE;
-
-        if (strcmp(buff, "malloc") == 0)
-        {
-            strbuf_t sbuf;
-
-            status_parse(&sbuf, "malloc");
-            strbuf_send(&sbuf);
-            return 1;
-        }
-
-        if (strcmp(buff, "malloc extstats") == 0)
-        {
-            strbuf_t sbuf;
-
-            status_parse(&sbuf, "malloc extstats");
-            strbuf_send(&sbuf);
-            return 1;
-        }
-
-        if (strcmp(buff, "dumpallobj") == 0) {
-
-            if (!current_object)
-            {
-                current_object = ref_object(command_giver, "dumpallobj");
-                no_curobj = MY_TRUE;
-            }
-            add_message("Dumping to /OBJ_DUMP ... ");
-            dumpstat(STR_OBJDUMP_FNAME);
-            dumpstat_dest(STR_DESTOBJDUMP_FNAME);
-            add_message("done\n");
-            if (no_curobj)
-            {
-                free_object(current_object, "dumpallobj");
-                current_object = NULL;
-            }
-            return 1;
-        }
-#ifdef OPCPROF /* amylaar */
-        if (strcmp(buff,  "opcdump") == 0) {
-            if (!current_object)
-            {
-                current_object = ref_object(command_giver, "opcdump");
-                no_curobj = MY_TRUE;
-            }
-            opcdump(STR_OPCDUMP_FNAME);
-            if (no_curobj)
-            {
-                free_object(current_object, "opcdump");
-                current_object = NULL;
-            }
-            return 1;
-        }
-#endif
-        if (strncmp(buff, "status", (size_t)6) == 0)
-        {
-            Bool rc;
-            strbuf_t sbuf;
-
-            rc = status_parse(&sbuf, buff+6+(buff[6]==' '));
-            if (rc)
-                strbuf_send(&sbuf);
-            else
-                strbuf_free(&sbuf);
-            return rc;
-        }
-    } /* end of wizard-only special parse commands */
-
-    return 0;
-} /* special_parse() */
-
-/*-------------------------------------------------------------------------*/
 static void
 notify_no_command (char *command, object_t *save_command_giver)
 
@@ -883,11 +798,6 @@ parse_command (char *buff, Bool from_efun)
      * This may clobber command_giver and/or current_object.
      */
     if (!from_efun && call_modify_command(buff))
-        return MY_TRUE;
-
-    /* Parse for special commands
-     */
-    if (!from_efun && special_parse(buff))
         return MY_TRUE;
 
     /* Determine the verb and set last_verb and last_command
@@ -1151,11 +1061,7 @@ parse_command (char *buff, Bool from_efun)
         }
 
         /* Command was found */
-        if (O_IS_INTERACTIVE(command_giver)
-#ifdef USE_SET_IS_WIZARD
-            && !(command_giver->flags & O_IS_WIZARD)
-#endif
-           )
+        if (O_IS_INTERACTIVE(command_giver))
         {
             command_object->user->score++;
         }
@@ -2263,68 +2169,6 @@ f_query_actions (svalue_t *sp)
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
-f_disable_commands (svalue_t *sp)
-
-/* EFUN disable_commands()
- *
- *   void disable_commands()
- *
- * Disable this object to use commands normally accessible to
- * users.
- */
-
-{
-    if (current_object->flags & O_DESTRUCTED)
-        return sp;
-
-    if (d_flag > 1) {
-        debug_message("%s Disable commands %s (ref %"PRIdPINT")\n"
-                     , time_stamp(), get_txt(current_object->name)
-                     , current_object->ref);
-    }
-
-    current_object->flags &= ~O_ENABLE_COMMANDS;
-    command_giver = NULL;
-
-    return sp;
-} /* f_disable_commands() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_enable_commands (svalue_t *sp)
-
-/* EFUN enable_commands()
- *
- *   void enable_commands()
- *
- * Enable this object to use commands normally accessible to
- * users.
- */
-
-{
-    interactive_t *ip;
-
-    if (current_object->flags & O_DESTRUCTED)
-        return sp;
-
-    if (d_flag > 1) {
-        debug_message("%s Enable commands %s (ref %"PRIdPINT")\n"
-                     , time_stamp(), get_txt(current_object->name)
-                     , current_object->ref);
-    }
-
-    current_object->flags |= O_ENABLE_COMMANDS;
-    command_giver = current_object;
-    if (O_SET_INTERACTIVE(ip, command_giver))
-    {
-        trace_level |= ip->trace_level;
-    }
-
-    return sp;
-} /* f_enable_commands() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
 f_notify_fail (svalue_t *sp)
 
 /* EFUN notify_fail()
@@ -2465,99 +2309,6 @@ f_query_notify_fail (svalue_t *sp)
 
     return sp;
 } /* f_query_notify_fail() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_set_modify_command (svalue_t *sp)
-
-/* EFUN set_modify_command()
- *
- *   object set_modify_command(object)
- *   object set_modify_command(string)
- *   object set_modify_command(int)
- *
- * All commands for the current object (that must obviously be interactive)
- * will be passed to ob->modify_command() before actually being executed. The
- * argument can be passed an object or a file_name.
- *
- * When set_modify_command() was called, the parser won't expand the standard
- * abbreviations n,e,s,w,nw,sw,ne,se for that user anymore, nor use any hook
- * set for this.
- *
- * 0 as argument will stop the command modification and reinstall
- *   the standard abbreviations.
- * -1 as argument will just return the object previously set.
- *
- * The return value is the object that was previously set with
- * set_modify_command(), if any.
- */
-
-{
-    object_t *old, *new;
-    interactive_t *ip;
-
-    inter_sp = sp;
-
-    /* Make sure the current_object is interactive */
-
-    if (!(O_SET_INTERACTIVE(ip, current_object))
-     || ip->closing)
-    {
-        errorf("set_modify_command in non-interactive object\n");
-    }
-
-    /* Get the old setting */
-    old = ip->modify_command;
-    if (old && old->flags & O_DESTRUCTED)
-    {
-        free_object(old, "set_modify_command");
-        old = NULL;
-        ip->modify_command = NULL;
-    }
-
-    /* Set the new setting */
-    new = sp->u.ob;
-    switch(sp->type)
-    {
-    default:
-        efun_gen_arg_error(1, sp->type, sp);
-        break;
-
-    case T_STRING:
-        new = get_object(sp->u.str);
-        if (!new)
-            errorf("Object '%s' not found.\n", get_txt(sp->u.str));
-        /* FALLTHROUGH */
-
-    case T_OBJECT:
-        ip->modify_command = ref_object(new, "set_modify_command");
-        break;
-
-    case T_NUMBER:
-        if (sp->u.number == 0 )
-        {
-            /* ref count of old is reused below, so don't free now */
-            ip->modify_command = NULL;
-        }
-        else
-        {
-            if (sp->u.number != -1)
-                errorf("Bad num arg 1 to set_modify_command(): got %"PRIdPINT
-                       ", expected 0 or -1\n", sp->u.number);
-            if (old) ref_object(old, "set_modify_command");
-        }
-    }
-
-    free_svalue(sp);
-
-    /* Return the old setting */
-    if (old)
-        put_object(sp, old); /* reuse ref count */
-    else
-        put_number(sp, 0);
-
-    return sp;
-} /* f_set_modify_command() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *

@@ -46,7 +46,7 @@
 
 #include "i-eval_cost.h"
 
-#include "../mudlib/sys/debug_info.h"
+#include "../mudlib/sys/driver_info.h"
 
 /*-------------------------------------------------------------------------*/
 
@@ -574,26 +574,29 @@ call_out_status (strbuf_t *sbuf, Bool verbose)
 
 /*-------------------------------------------------------------------------*/
 void
-callout_dinfo_status (svalue_t *svp, int value)
+callout_driver_info (svalue_t *svp, int value)
 
-/* Return the callout information for debug_info(DINFO_DATA, DID_STATUS).
- * <svp> points to the svalue block for the result, this function fills in
- * the spots for the object table.
- * If <value> is -1, <svp> points indeed to a value block; other it is
- * the index of the desired value and <svp> points to a single svalue.
+/* Returns the call-out information for driver_info(<what>).
+ * <svp> points to the svalue for the result.
  */
 
 {
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code
+    switch (value)
+    {
+        case DI_NUM_CALLOUTS:
+            put_number(svp, num_callouts);
+            break;
 
-    remove_stale_call_outs();
-    ST_NUMBER(DID_ST_CALLOUTS, num_callouts);
-    ST_NUMBER(DID_ST_CALLOUT_SIZE, num_callouts * sizeof(struct call));
+        case DI_SIZE_CALLOUTS:
+            put_number(svp, num_callouts * sizeof(struct call));
+            break;
 
-#undef ST_NUMBER
-} /* callout_dinfo_status() */
+        default:
+            fatal("Unknown option for callout_driver_info(): %d\n", value);
+            break;
+    }
+
+} /* callout_driver_info() */
 
 /*-------------------------------------------------------------------------*/
 #ifdef DEBUG

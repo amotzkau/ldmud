@@ -36,6 +36,7 @@ struct wiz_list_s
 
 /* --- Variables --- */
 
+extern int wiz_info_extra_size;
 extern wiz_list_t *all_wiz;
 extern wiz_list_t default_wizlist_entry;
 extern char wizlist_name[];
@@ -54,7 +55,6 @@ extern svalue_t *f_get_error_file(svalue_t *sp);
 extern svalue_t *f_wizlist_info(svalue_t *sp);
 extern svalue_t *f_set_extra_wizinfo(svalue_t *sp);
 extern svalue_t *f_get_extra_wizinfo(svalue_t *sp);
-extern svalue_t *f_set_extra_wizinfo_size(svalue_t *sp);
 
 #ifdef GC_SUPPORT
 extern void clear_ref_from_wiz_list(void);

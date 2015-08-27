@@ -64,9 +64,6 @@ struct object_s
 /* Values of object_t.flags: */
 
 #define O_HEART_BEAT         0x01   /* Does it have an heart beat? */
-#ifdef USE_SET_IS_WIZARD
-#define O_IS_WIZARD          0x02   /* Is it a wizard player.c? */
-#endif
 #define O_ENABLE_COMMANDS    0x04   /* Can it execute commands? */
 #define O_CLONE              0x08   /* Is it cloned from a master copy? */
 #define O_DESTRUCTED         0x10   /* Is it destructed ? */
@@ -303,7 +300,6 @@ extern svalue_t *f_object_name(svalue_t *sp);
 extern svalue_t *f_object_time(svalue_t *sp);
 extern svalue_t *f_program_name(svalue_t *sp);
 extern svalue_t *f_program_time(svalue_t *sp);
-extern svalue_t *f_query_once_interactive(svalue_t *sp);
 extern svalue_t *f_rename_object(svalue_t *sp);
 extern svalue_t *v_replace_program(svalue_t *sp, int num_arg);
 extern svalue_t *f_tell_object(svalue_t *sp);

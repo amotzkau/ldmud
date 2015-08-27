@@ -59,7 +59,7 @@
 
 #include "i-eval_cost.h"
 
-#include "../mudlib/sys/debug_info.h"
+#include "../mudlib/sys/driver_info.h"
 
 /*-------------------------------------------------------------------------*/
 
@@ -451,78 +451,52 @@ heart_beat_status (strbuf_t * sbuf, Bool verbose)
 
 /*-------------------------------------------------------------------------*/
 void
-hbeat_dinfo_status (svalue_t *svp, int value)
+hbeat_driver_info (svalue_t *svp, int value)
 
-/* Return the heartbeat information for debug_info(DINFO_DATA, DID_STATUS).
- * <svp> points to the svalue block for the result, this function fills in
- * the spots for the object table.
- * If <value> is -1, <svp> points indeed to a value block; other it is
- * the index of the desired value and <svp> points to a single svalue.
+/* Returns the heartbeat information for driver_info(<what>).
+ * <svp> points to the svalue for the result.
  */
 
 {
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code
+    switch (value)
+    {
+        case DI_NUM_HEARTBEAT_TOTAL_CYCLES:
+            put_number(svp, total_hb_calls);
+            break;
 
-#define ST_DOUBLE(which,code) \
-    if (value == -1) { \
-        svp[which].type = T_FLOAT; \
-        STORE_DOUBLE(svp+which, code); \
-    } else if (value == which) { \
-        svp->type = T_FLOAT; \
-        STORE_DOUBLE(svp, code); \
-    }
+        case DI_NUM_HEARTBEAT_ACTIVE_CYCLES:
+            put_number(svp, num_hb_calls);
+            break;
 
-    STORE_DOUBLE_USED;
+        case DI_NUM_HEARTBEATS_LAST_PROCESSED:
+            put_number(svp, hb_num_done);
+            break;
 
-    ST_NUMBER(DID_ST_HBEAT_OBJS, num_hb_objs);
-    ST_NUMBER(DID_ST_HBEAT_CALLS, num_hb_calls);
-    ST_NUMBER(DID_ST_HBEAT_CALLS_TOTAL, total_hb_calls);
-    ST_NUMBER(DID_ST_HBEAT_SLOTS, num_hb_objs);
-    ST_NUMBER(DID_ST_HBEAT_SIZE, num_hb_objs * sizeof(struct hb_info));
-    ST_NUMBER(DID_ST_HBEAT_PROCESSED, hb_num_done);
-    ST_DOUBLE(DID_ST_HBEAT_AVG_PROC
-             , avg_num_hb_objs
+        case DI_NUM_HEARTBEATS:
+            put_number(svp, num_hb_objs);
+            break;
+
+        case DI_SIZE_HEARTBEATS:
+            put_number(svp, num_hb_objs * sizeof(struct hb_info));
+            break;
+
+        case DI_LOAD_AVERAGE_PROCESSED_HEARTBEATS_RELATIVE:
+            put_float(svp, avg_num_hb_objs
                ? ((double)avg_num_hb_done / avg_num_hb_objs)
                : 1.0
              );
+            break;
 
-#undef ST_NUMBER
-#undef ST_DOUBLE
-} /* hbeat_dinfo_status() */
+        default:
+            fatal("Unknown option for hbeat_driver_info(): %d\n", value);
+            break;
+    }
+
+} /* hbeat_driver_info() */
 
 /*=========================================================================*/
 
 /*                               EFUNS                                     */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_set_heart_beat (svalue_t *sp)
-
-/* EFUN set_heart_beat()
- *
- *   int set_heart_beat(int flag)
- *
- * Enable or disable heart beat. The driver will apply
- * the lfun heart_beat() to the current object every 2 seconds,
- * if it is enabled. If the heart beat is not needed for the
- * moment, then do disable it. This will reduce system overhead.
- *
- * Return true for success, and false for failure.
- *
- * Disabling an already disabled heart beat (and vice versa
- * enabling and enabled heart beat) counts as failure.
- */
-
-{
-    int i;
-
-    i = set_heart_beat(current_object, sp->u.number != 0);
-    sp->u.number = i;
-
-    return sp;
-} /* f_set_heart_beat() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *

@@ -289,7 +289,7 @@ do_state_check (int minlvl, const char *where)
     {
         debug_message("%s Inconsistency %s\n", time_stamp(), where);
         printf("%s Inconsistency %s\n", time_stamp(), where);
-        (void)dump_trace(MY_TRUE, NULL);
+        (void)dump_trace(MY_TRUE, NULL, NULL);
 #ifdef TRACE_CODE
         last_instructions(TOTAL_TRACE_LENGTH, 1, 0);
 #endif
@@ -1590,33 +1590,6 @@ v_garbage_collection (svalue_t *sp, int num_arg)
 
     return sp;
 } /* v_garbage_collection() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_load_average (svalue_t *sp)
-
-/* EFUN query_load_average()
- *
- * Return a string with the current load_av and compile_av.
- * The string returned points to a local static buffer.
- */
-
-{
-    char buff[100];
-
-#if defined(__MWERKS__) && !defined(WARN_ALL)
-#    pragma warn_largeargs off
-#endif
-    sprintf(buff, "%.2f cmds/s, %.2f comp lines/s"
-                , stat_load.weighted_avg
-                , stat_compile.weighted_avg
-                );
-#if defined(__MWERKS__)
-#    pragma warn_largeargs reset
-#endif
-    push_c_string(sp, buff);
-    return sp;
-} /* f_query_load_average() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *

@@ -43,7 +43,7 @@
 #include "svalue.h"
 #include "xalloc.h"
 
-#include "../mudlib/sys/debug_info.h"
+#include "../mudlib/sys/driver_info.h"
 
 /*=========================================================================*/
 /*                           OBJECT TABLE                                  */
@@ -303,26 +303,34 @@ show_otable_status (strbuf_t * sbuf, Bool verbose)
 
 /*-------------------------------------------------------------------------*/
 void
-otable_dinfo_status (svalue_t *svp, int value)
+otable_driver_info (svalue_t *svp, int value)
 
-/* Return the object table information for debug_info(DINFO_DATA, DID_STATUS).
- * <svp> points to the svalue block for the result, this function fills in
- * the spots for the object table.
- * If <value> is -1, <svp> points indeed to a value block; other it is
- * the index of the desired value and <svp> points to a single svalue.
+/* Returns the object table information for driver_info(<what>).
+ * <svp> points to the svalue for the result.
  */
 
 {
-#define ST_NUMBER(which,code) \
-    if (value == -1) svp[which].u.number = code; \
-    else if (value == which) svp->u.number = code
+    switch (value)
+    {
+        case DI_NUM_OBJECTS_IN_TABLE:
+            put_number(svp, objs_in_table);
+            break;
 
-    ST_NUMBER(DID_ST_OTABLE, objs_in_table);
-    ST_NUMBER(DID_ST_OTABLE_SLOTS, OTABLE_SIZE);
-    ST_NUMBER(DID_ST_OTABLE_SIZE, OTABLE_SIZE * sizeof(object_t *));
+        case DI_NUM_OBJECT_TABLE_SLOTS:
+            put_number(svp, OTABLE_SIZE);
+            break;
 
-#undef ST_NUMBER
-} /* otable_dinfo_status() */
+        case DI_SIZE_OBJECT_TABLE:
+            put_number(svp, OTABLE_SIZE * sizeof(object_t *));
+            break;
+
+
+        default:
+            fatal("Unknown option for otable_driver_info(): %d\n", value);
+            break;
+    }
+
+} /* otable_driver_info() */
 
 /*=========================================================================*/
 /*                           GENERAL ROUTINES                              */

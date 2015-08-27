@@ -148,6 +148,7 @@
 #include "../mudlib/sys/configuration.h"
 #include "../mudlib/sys/driver_hook.h"
 #include "../mudlib/sys/input_to.h"
+#include "../mudlib/sys/interactive_info.h"
 
 /* if driver is compiled for ERQ demon then include the necessary file
  */
@@ -723,7 +724,7 @@ comm_fatal (interactive_t *ip, char *fmt, ...)
                      , ts, current_object->name
                            ? get_txt(current_object->name) : "<null>");
     debug_message("%s Dump of the call chain:\n", ts);
-    (void)dump_trace(MY_TRUE, NULL); fflush(stdout);
+    (void)dump_trace(MY_TRUE, NULL, NULL); fflush(stdout);
 
     va_end(va);
 
@@ -6290,134 +6291,6 @@ count_input_refs (input_t *i)
 /*=========================================================================*/
 
 /*-------------------------------------------------------------------------*/
-static svalue_t *
-query_ip_name (svalue_t *sp, Bool lookup)
-
-/* Lookup the IP address (<lookup> is false) or IP hostname (<lookup> is
- * true) of object <sp> and return it. If <sp> is the number 0 or a
- * non-interactive object, the number 0 is returned.
- *
- * The hostname is read from the iptable[], so if it hasn't been
- * resolved yet, we return the number in any case.
- *
- * If <sp> is a reference to an interactive object, it will be replaced
- * on return with an array of integers with the full sockaddr_in:
- *    array[0.. 1]: sin_family
- *    array[2.. 3]: sin_port
- *    array[4.. 7]: sin_addr
- *    array[8..15]: undefined (ideally 0).
- *
- * The function is used to implement the efuns query_ip_number() and
- * query_ip_name().
- */
-
-{
-    object_t *ob;
-    int i;
-    interactive_t *ip;
-    string_t *str;
-
-    /* Set <ob> to the object passed on the stack. */
-
-    if (sp->type != T_OBJECT)
-    {
-        svalue_t *svp;
-
-        if (sp->type == T_NUMBER && !sp->u.number)
-            return sp;
-        svp = sp;
-        while (svp->type == T_LVALUE || svp->type == T_PROTECTED_LVALUE)
-            svp = svp->u.lvalue;
-        if (svp->type != T_OBJECT)
-        {
-            errorf("Bad arg 1 to query_ip_number(): expected object/object&, got %s&.\n"
-                 , typename(svp->type));
-            /* NOTREACHED */
-        }
-        ob = svp->u.ob;
-    }
-    else
-    {
-        ob = sp->u.ob;
-        deref_object(ob, "query_ip_name");
-        sp->type = T_INVALID;
-    }
-
-    /* Return 0 for non-interactive objects */
-    if (!(O_SET_INTERACTIVE(ip, ob)))
-    {
-        free_svalue(sp);
-        put_number(sp, 0);
-        return sp;
-    }
-
-    /* If the object was passed as reference, replace it with an array
-     * with the full sockaddr_in.
-     */
-    if (sp->type == T_LVALUE)
-    {
-        svalue_t array, *svp;
-        vector_t *v;
-        char *cp;
-
-        v = allocate_array(sizeof ip->addr);
-        if (v)
-        {
-            put_array(&array, v);
-            i = sizeof ip->addr;
-            svp = v->item;
-            cp = (char *)&ip->addr;
-            do {
-                svp->u.number = *cp++;
-                svp++;
-            } while(--i);
-            transfer_svalue(sp, &array);
-        }
-        else
-        {
-            assign_svalue(sp, &const0);
-        }
-
-        return sp;
-    }
-
-    /* If the hostname is requested and we indeed have it in our table,
-     * return it.
-     */
-    if (lookup)
-    {
-#ifdef ERQ_DEMON
-        string_t * hname;
-
-        hname = lookup_ip_entry(ip->addr.sin_addr, MY_FALSE);
-        if (hname)
-        {
-            put_ref_string(sp, hname);
-            return sp;
-        }
-#else
-        /* The if(lookup) gets rid of a 'lookup unused' warning. */
-#endif
-    }
-
-    /* Return the IP address as string.
-     */
-
-#ifndef USE_IPV6
-    str = new_mstring(inet_ntoa(ip->addr.sin_addr));
-#else
-    str = new_mstring(inet6_ntoa(ip->addr.sin_addr));
-#endif
-    if (!str)
-    {
-        inter_sp = sp - 1;
-        errorf("Out of memory for IP address\n");
-    }
-    put_string(sp, str);
-    return sp;
-} /* query_ip_number() */
-
-/*-------------------------------------------------------------------------*/
 char *
 query_host_name (void)
 
@@ -6451,89 +6324,6 @@ get_host_ip_number (void)
 #endif
     return string_copy(buf);
 } /* query_host_ip_number() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_snoop (svalue_t *sp)
-
-/* EFUN: query_snoop()
- *
- *   object query_snoop(object victim)
- *
- * Return the object which is snooping <victim>, or 0 if there is none.
- * The call must be allowed by master->valid_query_snoop().
- */
-
-{
-    svalue_t *arg1;
-    object_t *ob;
-
-    /* Do some test and set ob to the snooper (if any) */
-    switch (0) /* try {...} */
-    {
-      default:
-        ob = sp->u.ob;
-        if ((ob->flags & (O_DESTRUCTED|O_SHADOW)) != O_SHADOW
-         || O_GET_SHADOW(ob)->ip == NULL)
-        {
-            zero_object_svalue(sp);
-            return sp;
-        }
-        inter_sp = sp;
-        assert_master_ob_loaded();
-        if (current_object != master_ob)
-        {
-            assign_eval_cost();
-            arg1 = apply_master(STR_VALID_QSNOOP, 1);
-            if (arg1 == 0 || arg1->type != T_NUMBER || !arg1->u.number)
-            {
-                ob = NULL;
-                break;
-            }
-        }
-        else
-        {
-            deref_object(ob, "query_snoop");
-        }
-        ob = O_GET_INTERACTIVE(ob)->snoop_by;
-    }
-
-    /* Return the result */
-    if (ob)
-        put_ref_object(sp, ob, "query_snoop");
-    else
-        put_number(sp, 0);
-    return sp;
-} /* f_query_snoop() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_idle (svalue_t *sp)
-
-/* EFUN: query_idle()
- *
- *   int query_idle(object ob)
- *
- * Return how many seconds a user object has been idle.
- */
-
-{
-    int i;
-    object_t *ob;
-
-    ob = sp->u.ob;
-    if (!O_IS_INTERACTIVE(ob))
-    {
-        inter_sp = sp;
-        errorf("query_idle() of non-interactive object.\n");
-        return sp;
-    }
-
-    i = current_time - O_GET_INTERACTIVE(ob)->last_time;
-    deref_object(ob, "query_idle");
-    put_number(sp, i);
-    return sp;
-} /* f_query_idle() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
@@ -6776,63 +6566,6 @@ f_send_udp (svalue_t *sp)
     return sp;
     
 } /* f_send_udp() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_set_buffer_size (svalue_t *sp)
-
-/* EFUN: set_buffer_size()
- *
- *   int set_buffer_size(int size)
- *
- * Changes the socket buffer size for this_interactive() to size,
- * up to a preconfigured maximum, result is the old buffer size
- * (or -1 on systems which aren't able to change the socket
- * buffer).
- * Modifying the buffer size may result in a better IO
- * throughput, but can also worsen it.
- */
-
-{
-    int new;
-
-    /* Get the desired buffer size */
-
-    if (sp->u.number > SET_BUFFER_SIZE_MAX)
-    {
-        errorf("Bad arg 1 to set_buffer_size(): value %"PRIdPINT" exceeds maximum %ld\n"
-             , sp->u.number, (long) SET_BUFFER_SIZE_MAX);
-        /* NOTREACHED */
-        return sp;
-    }
-    new = sp->u.number;
-
-    sp->u.number = -1; /* Default result */
-
-#ifdef SO_SNDBUF
-    {
-        int old;
-        length_t optlen;
-        interactive_t *ip;
-
-        if (!(O_SET_INTERACTIVE(ip, current_object))
-         || ip->do_close)
-        {
-            return sp;
-        }
-
-
-        optlen = sizeof old;
-        if (getsockopt(ip->socket, SOL_SOCKET, SO_SNDBUF, (char *)&old, &optlen) < 0)
-            return sp;
-        if (setsockopt(ip->socket, SOL_SOCKET, SO_SNDBUF, (char *)&new, sizeof new) < 0)
-            return sp;
-        sp->u.number = old;
-    }
-#endif /* SO_SNDBUF */
-
-    return sp;
-} /* f_set_buffer_size() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
@@ -7468,52 +7201,6 @@ get_input_handler (interactive_t *ip, input_type_t type)
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
-f_query_input_pending (svalue_t *sp)
-
-/* EFUN query_input_pending()
- *
- *   object query_input_pending(object ob)
- *
- * If ob is interactive and currently has an input_to() pending,
- * the object that has called the input_to() is returned,
- * else 0.
- */
-
-{
-    object_t *ob, *cb;
-    interactive_t *ip;
-
-    ob = sp->u.ob;
-    if (O_SET_INTERACTIVE(ip, ob) && ip->input_handler)
-    {
-        input_t *ih = ip->input_handler;
-
-        while (ih && ih->type != INPUT_TO)
-            ih = ih->next;
-
-        if (ih)
-        {
-            cb = callback_object(&(((input_to_t*)ih)->fun));
-            if (cb)
-                sp->u.ob = ref_object(cb, "query_input_pending");
-            else
-                put_number(sp, 0);
-        }
-        else
-            put_number(sp, 0);
-    }
-    else
-    {
-        put_number(sp, 0);
-    }
-
-    deref_object(ob, "query_input_pending");
-
-    return sp;
-} /* f_query_input_pending() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
 v_find_input_to (svalue_t *sp, int num_arg)
 
 /* EFUN: find_input_to()
@@ -7938,137 +7625,28 @@ f_input_to_info (svalue_t *sp)
 } /* f_input_to_info() */
 
 /*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_ip_name (svalue_t *sp)
-
-/* EFUN query_ip_name()
- *
- *   string query_ip_name(object ob)
- *
- * Give the ip-name for user the current user or for the optional
- * argument ob. An asynchronous process 'erq' is used to find
- * out these names in parallel. If there are any failures to find
- * the ip-name, then the ip-number is returned instead.
- */
-
-{
-    return query_ip_name(sp, MY_TRUE);
-} /* f_query_ip_name() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_ip_number (svalue_t *sp)
-
-/* EFUN query_ip_number()
- *
- *   string query_ip_number(object  ob)
- *   string query_ip_number(mixed & ob)
- *
- * Give the ip-number for the current user or the optional
- * argument ob.
- *
- * If ob is given as reference (and it must be a valid object
- * then), it will upon return be set to the struct sockaddr_in of
- * the queried object, represented by an array of integers, one
- * integer per address byte:
- *   ob[0.. 1]: sin_family
- *   ob[2.. 3]: sin_port
- *   ob[4.. 7]: sin_addr
- *   ob[8..15]: undefined.
- */
-
-{
-    return query_ip_name(sp, MY_FALSE);
-} /* f_query_ip_number() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_mud_port (svalue_t *sp)
-
-/* EFUN: query_mud_port()
- *
- * Returns the port number the parser uses for user connections.
- *
- *   int query_mud_port(void)
- *
- * If no argument is given, the port for this_player() is
- * returned. If this_player() is not existing or not interactive,
- * the first port number open for connections is returned.
- *
- *   int query_mud_port(object user)
- *   int query_mud_port(int num)
- *
- * If an user object is given, the port used for its connection
- * is returned.
- * If a positive number is given, the <num>th port number the
- * parser uses for connections is returned (given that there are
- * that many ports).
- * If -1 is given, the number of ports open for connections is
- * returned.
- */
-
-{
-    object_t *ob;
-    interactive_t *ip;
-    struct sockaddr_in addr;
-    length_t length;
-
-    length = sizeof(addr);
-
-    if (sp->type == T_NUMBER)
-    {
-        if (sp->u.number < -1 || sp->u.number >= numports)
-        {
-            errorf("Bad arg 1 to query_mud_port(): value %"PRIdPINT" out of range.\n"
-                 , sp->u.number);
-            /* NOTREACHED */
-        }
-        sp->u.number = sp->u.number < 0 ? numports : port_numbers[sp->u.number];
-        return sp;
-    }
-
-    ob = sp->u.ob;
-    deref_object(ob, "query_ip_port");
-
-    if ( !(O_SET_INTERACTIVE(ip, ob))) {
-        put_number(sp, port_numbers[0]);
-        return sp;
-    }
-
-    getsockname(ip->socket, (struct sockaddr *)&addr, &length);
-    put_number(sp, ntohs(addr.sin_port));
-    return sp;
-} /* f_query_mud_port() */
-
-/*-------------------------------------------------------------------------*/
 
 
-static inline void translate_bit(char c, int i, int length, string_t *rc, unsigned int bitno)
+static inline void translate_bit(char c, int i, int *length, string_t *rc, unsigned int bitno)
 /* static helper function to translatin bits to characters in get_charset */
 {
   if (c & (1 << bitno))
-    get_txt(rc)[length++] = (char)(i * 8 + bitno);
+    get_txt(rc)[(*length)++] = (char)(i * 8 + bitno);
 } /* translate_bit */
 
 static void
-get_charset (svalue_t * sp, p_int mode, char charset[32])
+get_charset (svalue_t * sp, bool as_string, char charset[32])
 
 /* Translate the <charset> into an svalue and store it into <sp>:
- *   <mode> == CHARSET_VECTOR: result is a bitvector array
- *   <mode> == CHARSET_STRING: result is a string.
+ *   <as_string> == false: result is a bitvector array
+ *   <as_string> == true:  result is a string.
  */
 
 {
     put_number(sp, 0);
-    switch (mode)
-    {
-    default:
-        fatal("(get_charset): Illegal mode value %"PRIdPINT"\n", mode);
-        /* NOTREACHED */
-        break;
 
-    case CHARSET_VECTOR:
-      {
+    if (!as_string)
+    {
         vector_t * rc;
         int i;
 
@@ -8077,18 +7655,16 @@ get_charset (svalue_t * sp, p_int mode, char charset[32])
         {
             outofmemory("result array");
             /* NOTREACHED */
-            break;
+            return;
         }
 
         for (i = 0; i < 32; i++)
             put_number(rc->item+i, (unsigned char)charset[i]);
 
         put_array(sp, rc);
-        break;
-      }
-
-    case CHARSET_STRING:
-      {
+    }
+    else
+    {
         string_t * rc;
         int length, i;
 
@@ -8111,7 +7687,7 @@ get_charset (svalue_t * sp, p_int mode, char charset[32])
         {
             outofmemory("result string");
             /* NOTREACHED */
-            break;
+            return;
         }
 
         /* Translate the bits into characters */
@@ -8119,356 +7695,70 @@ get_charset (svalue_t * sp, p_int mode, char charset[32])
         {
             char c = charset[i];
 
-            translate_bit(c, i, length, rc, 0);
-            translate_bit(c, i, length, rc, 1);
-            translate_bit(c, i, length, rc, 2);
-            translate_bit(c, i, length, rc, 3);
-            translate_bit(c, i, length, rc, 4);
-            translate_bit(c, i, length, rc, 5);
-            translate_bit(c, i, length, rc, 6);
-            translate_bit(c, i, length, rc, 7);
+            translate_bit(c, i, &length, rc, 0);
+            translate_bit(c, i, &length, rc, 1);
+            translate_bit(c, i, &length, rc, 2);
+            translate_bit(c, i, &length, rc, 3);
+            translate_bit(c, i, &length, rc, 4);
+            translate_bit(c, i, &length, rc, 5);
+            translate_bit(c, i, &length, rc, 6);
+            translate_bit(c, i, &length, rc, 7);
         }
 
         put_string(sp, rc);
-        break;
-      } /* case CHARSET_STRING */
-    } /* switch(mode) */
+    } /* as_string */
 } /* get_charset() */
 
 /*-------------------------------------------------------------------------*/
-svalue_t *
-f_get_combine_charset (svalue_t *sp)
+static void
+set_charset_from_vector (vector_t* vec, char charset[32], const char* fun, int argnum)
 
-/* TEFUN: get_combine_charset()
- *
- *   mixed get_combine_charset (int mode)
- *
- * Return the combine charset of the current interactive in the form requested
- * by <mode>:
- *   <mode> == CHARSET_VECTOR: return as bitvector
- *   <mode> == CHARSET_STRING: return as string
- *
- * The bitvector is interpreted as an array of 8-bit-values and might
- * contain up to 32 elements. Character n is "combinable"
- * if sizeof(bitvector) > n/8 && bitvector[n/8] & (1 << n%8) .
- *
- * If there is no current interactive, the function returns 0. 
+/* Reads the charset from an vector of int <vec>,
+ * where each element represents a byte in the charset.
+ * <fun> and <argnum> is the function name and argument
+ * position for error messages.
  */
 
 {
-    p_int mode;
-    interactive_t *ip;
-
-    mode = sp->u.number;
-    if (mode != CHARSET_VECTOR && mode != CHARSET_STRING)
-    {
-        errorf("Bad arg 1 to get_combine_charset(): %"PRIdPINT", "
-              "expected CHARSET_VECTOR (%d) or CHARSET_STRING (%d)\n"
-             , mode, CHARSET_VECTOR, CHARSET_STRING);
-        /* NOTREACHED */
-        return sp;
-    }
-
-    if (current_interactive && O_SET_INTERACTIVE(ip, current_interactive))
-        get_charset(sp, mode, ip->combine_cset);
-    else
-        put_number(sp, 0);
-
-    return sp;
-} /* f_get_combine_charset() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_set_combine_charset (svalue_t *sp)
-
-/* EFUN: set_combine_charset()
- *
- *   void set_combine_charset (int* bitvector)
- *   void set_combine_charset (string chars)
- *   void set_combine_charset (0)
- *
- * Set the set of characters which can be combined into a single string
- * when received en-bloc in charmode from the current interactive user.
- * Non-combinable characters and single received characters are returned
- * in separate strings as usual. The function must be called with the
- * interactive user being the command giver.
- *
- * The newline '\n' and the NUL character '\0' are always non-combinable.
- *
- * The charset can be given either directly as a string, or indirectly
- * as a bitvector. If the charset is given as the number 0, the default
- * charset is re-established.
- *
- * The bitvector is interpreted as an array of 8-bit-values and might
- * contain up to 32 elements. Character n is "combinable"
- * if sizeof(bitvector) > n/8 && bitvector[n/8] & (1 << n%8) .
- */
-
-{
-    mp_int i;
+    mp_int i = (mp_int)VEC_SIZE(vec);
     svalue_t *svp;
     char *p;
-    interactive_t *ip;
 
-    i = 0;
-    if (sp->type == T_POINTER && (i = (mp_int)VEC_SIZE(sp->u.vec)) > 32)
+    if (i > 32)
+        errorf("Bad arg %d to %s: int[] too long (%"PRIdMPINT")\n", argnum, fun, i);
+
+    for ( svp = vec->item, p = charset
+        ; --i >= 0
+        ; svp++, p++)
     {
-        errorf("Bad arg 1 to set_combine_charset(): int[] too long (%"PRIdMPINT")\n"
-             , i);
-        /* NOTREACHED */
-        return sp;
+        if (svp->type == T_NUMBER)
+            *p = (char)svp->u.number;
     }
+    memset(p, 0, (size_t)(charset + 32 - p));
 
-    if (current_interactive && O_SET_INTERACTIVE(ip, current_interactive))
-    {
-        if (sp->type == T_NUMBER)
-        {
-            set_default_combine_charset(ip->combine_cset);
-        }
-        else if (sp->type == T_STRING)
-        {
-            memset(ip->combine_cset, 0, sizeof ip->combine_cset);
-            for ( i = mstrsize(sp->u.str), p = get_txt(sp->u.str)
-                ; i > 0
-                ; i--, p++)
-                ip->combine_cset[(*p & 0xff) / 8] |= 1 << (*p % 8);
-        }
-        else
-        {
-            /* i was set in the typecheck above */
-            for ( svp = sp->u.vec->item, p = ip->combine_cset
-                ; --i >= 0
-                ; svp++, p++)
-            {
-                if (svp->type == T_NUMBER)
-                    *p = (char)svp->u.number;
-            }
-            memset(p, 0, (size_t)(&ip->combine_cset[sizeof ip->combine_cset] - p));
-        }
-
-        ip->combine_cset['\n'/8] &= ~(1 << '\n' % 8);
-        ip->combine_cset['\0'/8] &= ~(1 << '\0' % 8);
-    }
-    free_svalue(sp);
-    sp--;
-    return sp;
-} /* f_set_combine_charset() */
+} /* set_charset_from_vector */
 
 /*-------------------------------------------------------------------------*/
-svalue_t *
-f_get_connection_charset (svalue_t *sp)
+static void
+set_charset_from_string (string_t* str, char charset[32], const char* fun, int argnum)
 
-/* TEFUN: get_connection_charset()
- *
- *   mixed get_connection_charset (int mode)
- *
- * Return the combine charset of the current interactive in the form requested
- * by <mode>:
- *   <mode> == CHARSET_VECTOR: return as bitvector
- *   <mode> == CHARSET_STRING: return as string
- *
- * Alternatively, the status of the IAC quoting can be returned:
- *   <mode> == CHARSET_QUOTE_IAC: return 0 if IACs are not quoted,
- *                                return 1 if they are.
- *
- * The bitvector is interpreted as an array of 8-bit-values and might
- * contain up to 32 elements. Character n is "combinable"
- * if sizeof(bitvector) > n/8 && bitvector[n/8] & (1 << n%8) .
- *
- * If there is no current interactive, the function returns 0. 
+/* Reads the charset from a string <str> containing all
+ * chars of the charset.
+ * <fun> and <argnum> is the function name and argument
+ * position for error messages.
  */
 
 {
-    p_int mode;
-    interactive_t *ip;
-
-    mode = sp->u.number;
-    if (mode != CHARSET_VECTOR && mode != CHARSET_STRING
-     && mode != CHARSET_QUOTE_IAC)
-    {
-        errorf("Bad arg 1 to get_connection_charset(): %"PRIdPINT", "
-              "expected CHARSET_VECTOR (%d), _STRING (%d), "
-              "or _QUOTE_IAC (%d)\n"
-             , mode, CHARSET_VECTOR, CHARSET_STRING, CHARSET_QUOTE_IAC);
-        /* NOTREACHED */
-        return sp;
-    }
-
-    if (current_interactive && O_SET_INTERACTIVE(ip, current_interactive))
-    {
-        if (mode == CHARSET_QUOTE_IAC)
-            put_number(sp, ip->quote_iac != 0);
-        else
-            get_charset(sp, mode, ip->charset);
-    }
-    else
-        put_number(sp, 0);
-
-    return sp;
-} /* f_get_connection_charset() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_set_connection_charset (svalue_t *sp)
-
-/* EFUN: set_connection_charset()
- *
- *   void set_connection_charset (int* bitvector, int quote_iac)
- *   void set_connection_charset (string charset, int quote_iac)
- *   void set_connection_charset (0, int quote_iac)
- *
- * Set the set of characters that can be output to the interactive user
- * (this does not apply to binary_message() ). The function must be called
- * by the interactive user object itself.
- *
- * The charset can be given either directly as a string, or indirectly
- * as a bitvector. If the charset is given as 0, the default connection
- * charset is re-established.
- *
- * The bitvector is interpreted as an array of 8-bit-values and might
- * contain up to 32 elements. Character n is allowed to be output
- * if sizeof(bitvector) > n/8 && bitvector[n/8] & (1 << n%8) .
- *
- * If quote_iac is 0 and char 255 is allowed to be output, IAC
- * will be output unmodified.
- * If quote_iac is 1 and char 255 is allowed to be output,
- * char 255 will be quoted so that it is not interpreted as IAC
- * by the telnet protocol.
- */
-
-{
-    mp_int i;
-    svalue_t *svp;
+    int i;
     char *p;
-    interactive_t *ip;
 
-    i = 0;
-    if (sp[-1].type == T_POINTER && (i = (mp_int)VEC_SIZE(sp[-1].u.vec)) > 32)
-    {
-        errorf("Bad arg 1 to set_connection_charset(): array too big (%"
-             PRIdMPINT")\n", i);
-        /* NOTREACHED */
-        return sp;
-    }
+    memset(charset, 0, 32);
+    for ( i = mstrsize(str), p = get_txt(str)
+        ; i > 0
+        ; i--, p++)
+        charset[(*p & 0xff) / 8] |= 1 << (*p % 8);
 
-    if (O_SET_INTERACTIVE(ip, current_object))
-    {
-        if (sp[-1].type == T_NUMBER)
-        {
-            set_default_conn_charset(ip->charset);
-        }
-        else if (sp[-1].type == T_STRING)
-        {
-            memset(ip->charset, 0, sizeof ip->charset);
-            for ( i = mstrsize((sp-1)->u.str), p = get_txt(sp[-1].u.str)
-                ; i > 0
-                ; i--, p++)
-                ip->charset[(*p & 0xff) / 8] |= 1 << (*p % 8);
-        }
-        else
-        {
-            /* i was set in the typecheck above */
-            for ( svp = sp[-1].u.vec->item, p = ip->charset
-                ; --i >= 0
-                ; svp++, p++)
-            {
-                if (svp->type == T_NUMBER)
-                    *p = (char)svp->u.number;
-            }
-            memset(p, 0, (size_t)(&ip->charset[sizeof ip->charset] - p));
-        }
-
-        ip->quote_iac = (char)sp->u.number;
-    }
-    sp--;
-    free_svalue(sp);
-    sp--;
-    return sp;
-} /* f_set_connection_charset() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_set_prompt (svalue_t *sp)
-
-/* EFUN set_prompt()
- *
- *       string set_prompt(mixed prompt, object ob)
- *
- * Set the prompt given by the first argument for the interactive object
- * instead of the default ``> ''. If the second argument is omitted,
- * this_player() is used as default. The first arg can be a string or a
- * closure. If the <prompt> arg is 0, the prompt is not changed.
- * TODO: Remove the acceptance of -1 here.
- *
- * The result returned is the old prompt.
- */
-
-{
-    svalue_t *prompt;
-    interactive_t *ip;
-
-    /* Make sure the object is interactive */
-    if (!(O_SET_INTERACTIVE(ip, sp->u.ob))
-     || ip->closing)
-    {
-        errorf("Bad arg 2 to set_prompt(): object not interactive.\n");
-        return sp;
-    }
-
-    /* Get the address of the prompt svalue */
-    prompt = &O_GET_INTERACTIVE(sp->u.ob)->prompt;
-
-    free_object_svalue(sp);
-    sp--;
-
-    if (sp->type == T_STRING || sp->type == T_CLOSURE)
-    {
-        if (sp->type == T_CLOSURE && sp->x.closure_type == CLOSURE_UNBOUND_LAMBDA)
-        {
-            inter_sp = sp;
-            errorf("Bad arg 1 for set_prompt(): lambda closure not bound\n");
-            /* NOTREACHED */
-        }
-
-        if (sp->type == T_STRING)
-        {
-            string_t *str = make_tabled_from(sp->u.str);
-
-            if (!str)
-            {
-                inter_sp = sp;
-                errorf("(set_prompt) Out of memory (%zu bytes) for prompt\n"
-                     , mstrsize(sp->u.str));
-            }
-            else
-            {
-                free_mstring(sp->u.str);
-                sp->u.str = str;
-            }
-        }
-
-        /* Three-way exchange to set the new prompt and put
-         * the old one onto the stack.
-         */
-        sp[1] = *prompt;
-        *prompt = *sp;
-        *sp = sp[1];
-    }
-    else /* It's a number */
-    {
-        if (sp->u.number == 0 || sp->u.number == -1)
-            assign_svalue(sp, prompt);
-        else
-        {
-            errorf("Bad int arg 1 to set_prompt(): got %"PRIdPINT", expected 0 or -1.\n"
-                 , sp->u.number);
-            /* NOTREACHED */
-            return sp;
-        }
-    }
-
-    return sp;
-} /* f_set_prompt() */
+} /* set_charset_from_string */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
@@ -8550,148 +7840,6 @@ f_users (svalue_t *sp)
     return sp;
 } /* f_users() */
 
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_query_udp_port (svalue_t *sp)
-
-/* EFUN query_udp_port()
- *
- *   int query_udp_port(void)
- *
- * Returns the port number that is used for the inter mud
- * protocol.
- */
-
-{
-    push_number(sp, udp_port);
-
-    return sp;
-} /* f_query_udp_port() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_get_max_commands (svalue_t *sp)
-
-/* TEFUN: get_max_commands()
- *
- *   int get_max_commands ()
- *   int get_max_commands (object obj)
- *
- * Return the max number of commands (read: line resp. char inputs) the
- * interactive <obj> (default is the current interactive) is allowed to
- * execute per second. A negative result means 'unlimited'.
- * For non-interactive objects the result is 0.
- */
-
-{
-    p_int rc;
-    interactive_t *ip;
-
-    rc = 0;
-    if (O_SET_INTERACTIVE(ip, sp->u.ob))
-        rc = ip->maxNumCmds;
-
-    free_svalue(sp);
-    put_number(sp, rc);
-
-    return sp;
-} /* f_get_max_commands() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_set_max_commands (svalue_t *sp)
-
-/* TEFUN: set_max_commands()
- *
- *   void set_max_commands (int num)
- *   void set_max_commands (int num, object obj)
- *
- * Set the max number of commands (read: line resp. char inputs) the
- * interactive <obj> (default is the current interactive) is allowed to
- * execute per second to <num>. A negative result means 'unlimited'.
- * For non-interactive objects the function raises an error.
- *
- * The function raises a privilege_violation ("set_max_commands", obj, num).
- * If the privilege is denied, the call is ignored.
- */
-
-{
-    p_int num;
-    interactive_t *ip;
-
-    num = sp[-1].u.number;
-    if (num < 0)
-        num = -1;
-
-    if (!O_SET_INTERACTIVE(ip, sp->u.ob))
-    {
-        errorf("Bad arg 2 to set_max_commands(): Object is not interactive.\n");
-        /* NOTREACHED */
-    }
-
-    if (privilege_violation4(STR_SET_MAX_CMDS, sp->u.ob, NULL, num, sp))
-        ip->maxNumCmds = num;
-
-    free_svalue(sp--);
-    free_svalue(sp--);
-    return sp;
-} /* f_set_max_commands() */
-
-/*-------------------------------------------------------------------------*/
-svalue_t *
-f_enable_telnet (svalue_t *sp)
-
-/* TEFUN: enable_telnet()
- *
- *   int enable_telnet (int num)
- *   int enable_telnet (int num, object obj)
- *
- * Enable or disable the telnet machine for the interactive object <obj>.
- * Return the previous state of the telnet machine as result.
- *
- * <num> > 0 : enable telnet machine (default)
- *       = 0 : disable telnet machine
- *       < 0 : just query the current state of the telnet machine.
- * <obj> : the interactive object, default is the current interactive.
- *         For non-interactive objects the function raises an error.
- *
- * The function raises a privilege_violation ("enable_telnet", obj, num)
- * if <num> is >= 0. If the privilege is denied, the call is ignored.
- *
- * WARNING: Careless use of this efun can cause great confusion for both
- * driver and clients!
- */
-
-{
-    p_int num;
-    p_int rc;
-    interactive_t *ip;
-
-    num = sp[-1].u.number;
-    if (num < 0)
-        num = -1;
-
-    if (!O_SET_INTERACTIVE(ip, sp->u.ob))
-    {
-        errorf("Bad arg 2 to enable_telnet(): Object '%s' is not interactive.\n"
-             , get_txt(sp->u.ob->name)
-             );
-        /* NOTREACHED */
-        return sp; /* flow control hint */
-    }
-
-    rc = (ip->tn_enabled != 0);
-    if (num >= 0
-     && privilege_violation4(STR_ENABLE_TELNET, sp->u.ob, NULL, num, sp))
-        ip->tn_enabled = (num != 0);
-
-    free_svalue(sp--);
-    free_svalue(sp);
-
-    put_number(sp, rc);
-    return sp;
-} /* f_enable_telnet() */
- 
 /*-------------------------------------------------------------------------*/
 void
 check_for_out_connections (void)
@@ -9061,8 +8209,9 @@ f_configure_interactive (svalue_t *sp)
         ip = NULL;
     }
 
-    if (ob != current_object
-     && !privilege_violation_n(STR_CONFIGURE_INTERACTIVE, ob, sp, 2))
+    if ((current_object->flags & O_DESTRUCTED)
+     || (ob != current_object
+      && !privilege_violation_n(STR_CONFIGURE_INTERACTIVE, ob, sp, 2)))
     {
         sp = pop_n_elems(3, sp);
         return sp;
@@ -9091,10 +8240,584 @@ f_configure_interactive (svalue_t *sp)
                 ip->write_max_size = max;
             break;
         }
+
+    case IC_SOCKET_BUFFER_SIZE:
+        if (!ip)
+            errorf("Default value for IC_SOCKET_BUFFER_SIZE is not supported.\n");
+        if (sp->type != T_NUMBER)
+            efun_exp_arg_error(3, TF_NUMBER, sp->type, sp);
+#ifdef SO_SNDBUF
+        {
+            int size = sp->u.number;
+            setsockopt(ip->socket, SOL_SOCKET, SO_SNDBUF, (char *)&size, sizeof(size));
+        }
+#endif
+        break;
+
+    case IC_COMBINE_CHARSET_AS_STRING:
+        if (!ip)
+            errorf("Default value for IC_COMBINE_CHARSET_AS_STRING is not supported.\n");
+        switch (sp->type)
+        {
+            case T_NUMBER:
+                if (sp->u.number != 0)
+                    efun_exp_arg_error(3, TF_STRING, sp->type, sp);
+                set_default_combine_charset(ip->combine_cset);
+                break;
+
+            case T_STRING:
+                set_charset_from_string(sp->u.str, ip->combine_cset, "configure_interactive with IC_COMBINE_CHARSET_AS_STRING", 3);
+                break;
+
+            default:
+                efun_exp_arg_error(3, TF_STRING, sp->type, sp);
+        }
+
+        /* Never combine \n or \0. */
+        ip->combine_cset['\n'/8] &= ~(1 << '\n' % 8);
+        ip->combine_cset['\0'/8] &= ~(1 << '\0' % 8);
+        break;
+
+    case IC_COMBINE_CHARSET_AS_ARRAY:
+        if (!ip)
+            errorf("Default value for IC_COMBINE_CHARSET_AS_ARRAY is not supported.\n");
+        switch (sp->type)
+        {
+            case T_NUMBER:
+                if (sp->u.number != 0)
+                    efun_exp_arg_error(3, TF_POINTER, sp->type, sp);
+                set_default_combine_charset(ip->combine_cset);
+                break;
+
+            case T_POINTER:
+                set_charset_from_vector(sp->u.vec, ip->combine_cset, "configure_interactive with IC_COMBINE_CHARSET_AS_ARRAY", 3);
+                break;
+
+            default:
+                efun_exp_arg_error(3, TF_POINTER, sp->type, sp);
+        }
+
+        /* Never combine \n or \0. */
+        ip->combine_cset['\n'/8] &= ~(1 << '\n' % 8);
+        ip->combine_cset['\0'/8] &= ~(1 << '\0' % 8);
+        break;
+
+    case IC_CONNECTION_CHARSET_AS_STRING:
+        if (!ip)
+            errorf("Default value for IC_CONNECTION_CHARSET_AS_STRING is not supported.\n");
+        switch (sp->type)
+        {
+            case T_NUMBER:
+                if (sp->u.number != 0)
+                    efun_exp_arg_error(3, TF_STRING, sp->type, sp);
+                set_default_conn_charset(ip->charset);
+                break;
+
+            case T_STRING:
+                set_charset_from_string(sp->u.str, ip->charset, "configure_interactive with IC_CONNECTION_CHARSET_AS_STRING", 3);
+                break;
+
+            default:
+                efun_exp_arg_error(3, TF_STRING, sp->type, sp);
+        }
+        break;
+
+    case IC_CONNECTION_CHARSET_AS_ARRAY:
+        if (!ip)
+            errorf("Default value for IC_CONNECTION_CHARSET_AS_ARRAY is not supported.\n");
+        switch (sp->type)
+        {
+            case T_NUMBER:
+                if (sp->u.number != 0)
+                    efun_exp_arg_error(3, TF_POINTER, sp->type, sp);
+                set_default_conn_charset(ip->charset);
+                break;
+
+            case T_POINTER:
+                set_charset_from_vector(sp->u.vec, ip->charset, "configure_interactive with IC_CONNECTION_CHARSET_AS_ARRAY", 3);
+                break;
+
+            default:
+                efun_exp_arg_error(3, TF_POINTER, sp->type, sp);
+        }
+        break;
+
+    case IC_QUOTE_IAC:
+        if (!ip)
+            errorf("Default value for IC_QUOTE_IAC is not supported.\n");
+
+        if (sp->type != T_NUMBER)
+            efun_exp_arg_error(3, TF_NUMBER, sp->type, sp);
+
+        ip->quote_iac = (char)sp->u.number;
+        break;
+
+    case IC_TELNET_ENABLED:
+        if (!ip)
+            errorf("Default value for IC_TELNET_ENABLED is not supported.\n");
+
+        if (sp->type != T_NUMBER)
+            efun_exp_arg_error(3, TF_NUMBER, sp->type, sp);
+
+        ip->tn_enabled = (sp->u.number != 0);
+        break;
+
+#ifdef USE_MCCP
+    case IC_MCCP:
+        if (!ip)
+            errorf("Default value for IC_MCCP is not supported.\n");
+
+        if (sp->type != T_NUMBER)
+            efun_exp_arg_error(3, TF_NUMBER, sp->type, sp);
+        else if(sp->u.number == 0)
+        {
+            /* Deactivating MCCP */
+            end_compress(ip, MY_FALSE);
+        }
+        else
+        {
+            /* Activating MCCP */
+            p_int mccpver;
+
+            if (!ip->tn_enabled)
+                mccpver = -1;
+            else
+            {
+                mccpver = sp->u.number;
+
+                if ((mccpver != TELOPT_COMPRESS)
+                 && (mccpver != TELOPT_COMPRESS2)
+                   )
+                {
+                    errorf("Illegal value to arg 3 of configure_interactive with IC_MCCP: %ld, "
+                          "expected TELOPT_COMPRESS (%d) or TELOPT_COMPRESS2 (%d).\n"
+                         , (long)mccpver, TELOPT_COMPRESS, TELOPT_COMPRESS2
+                         );
+                }
+            }
+
+            start_compress(ip, mccpver);
+        }
+        break;
+#endif /* USE_MCCP*/
+
+    case IC_PROMPT:
+        if (!ip)
+            errorf("Default value for IC_PROMPT is not supported.\n");
+
+        if (sp->type != T_STRING && sp->type != T_CLOSURE)
+            efun_exp_arg_error(3, TF_STRING|TF_CLOSURE, sp->type, sp);
+
+        if (sp->type == T_CLOSURE && sp->x.closure_type == CLOSURE_UNBOUND_LAMBDA)
+            errorf("Bad arg 3 for configure_interactive with IC_PROMPT: lambda closure not bound\n");
+
+        if (sp->type == T_STRING)
+        {
+            string_t *str = make_tabled_from(sp->u.str);
+
+            if (!str)
+                errorf("Out of memory (%zu bytes) for prompt\n", mstrsize(sp->u.str));
+            else
+            {
+                free_mstring(sp->u.str);
+                sp->u.str = str;
+            }
+        }
+
+        free_svalue(&ip->prompt);
+        assign_svalue_no_free(&ip->prompt, sp);
+        break;
+
+    case IC_MAX_COMMANDS:
+        if (!ip)
+            errorf("Default value for IC_MAX_COMMANDS is not supported.\n");
+
+        if (sp->type != T_NUMBER)
+            efun_exp_arg_error(3, TF_NUMBER, sp->type, sp);
+
+        if (sp->u.number < 0)
+            ip->maxNumCmds = -1;
+        else
+            ip->maxNumCmds = sp->u.number;
+        break;
+
+    case IC_MODIFY_COMMAND:
+        if (!ip)
+            errorf("Default value for IC_MODIFY_COMMAND is not supported.\n");
+
+        if (sp->type != T_OBJECT && (sp->type != T_NUMBER || sp->u.number != 0))
+            efun_exp_arg_error(3, TF_OBJECT, sp->type, sp);
+
+        if (ip->modify_command)
+            free_object(ip->modify_command, "configure_interactive(IC_MODIFY_COMMAND)");
+
+        if (sp->type == T_OBJECT)
+            ip->modify_command = ref_object(sp->u.ob, "configure_interactive(IC_MODIFY_COMMAND)");
+        else
+            ip->modify_command = NULL;
+        break;
     }
 
     sp = pop_n_elems(3, sp);
     return sp;
 } /* f_configure_interactive() */
+
+/*-------------------------------------------------------------------------*/
+static bool
+valid_query_snoop (object_t *ob)
+
+/* Checks with the master, if the current user
+ * is allowed to query who is snooping on <ob>.
+ */
+{
+    assert_master_ob_loaded();
+    if (current_object != master_ob)
+    {
+        svalue_t *valid;
+
+        assign_eval_cost();
+        push_ref_object(inter_sp, ob, "valid_query_snoop");
+        valid = apply_master(STR_VALID_QSNOOP, 1);
+        if (!valid || valid->type != T_NUMBER || !valid->u.number)
+            return false;
+    }
+
+    return true;
+} /* valid_query_snoop() */
+
+/*-------------------------------------------------------------------------*/
+svalue_t *
+f_interactive_info (svalue_t *sp)
+
+/* EFUN interactive_info()
+ *
+ *   mixed interactive_info (object ob, int what)
+ *
+ * Returns information about the interactive <ob>.
+ * <what> can either be a configuration option as given to
+ * configure_interactive() or one of the following options:
+ *
+ * <what> == II_...
+ *
+ * <ob> can be 0 to query default configuration options.
+ */
+
+{
+    object_t *ob;
+    interactive_t *ip;
+    svalue_t result;
+
+    if (sp[-1].type == T_OBJECT)
+    {
+        ob = sp[-1].u.ob;
+
+        if (!O_SET_INTERACTIVE(ip, ob))
+        {
+            errorf("Bad arg 1 to interactive_info(): "
+                   "Object '%s' is not interactive.\n"
+                 , get_txt(ob->name)
+                 );
+            return sp; /* NOTREACHED */
+        }
+    }
+    else
+    {
+        ob = NULL;
+        ip = NULL;
+    }
+
+    if (!ob && sp[0].u.number < 0)
+        errorf("There is no default value for non-configuration values.\n");
+
+    switch(sp[0].u.number)
+    {
+    default:
+        errorf("Illegal value %"PRIdPINT" for interactive_info().\n", sp[0].u.number);
+        return sp; /* NOTREACHED */
+
+    case IC_MAX_WRITE_BUFFER_SIZE:
+        if (!ip || ip->write_max_size == -2)
+            put_number(&result, write_buffer_max_size);
+        else
+            put_number(&result, ip->write_max_size);
+        break;
+
+    case IC_SOCKET_BUFFER_SIZE:
+        if (!ip)
+            errorf("Default value for IC_SOCKET_BUFFER_SIZE is not supported.\n");
+#ifdef SO_SNDBUF
+        {
+            int size;
+            length_t sizelen = sizeof(size);
+
+            if (!getsockopt(ip->socket, SOL_SOCKET, SO_SNDBUF, (char *)&size, &sizelen))
+                put_number(&result, size);
+            else
+                put_number(&result, -1);
+        }
+#else
+        put_number(&result, -1);
+#endif
+        break;
+
+    case IC_COMBINE_CHARSET_AS_STRING:
+        if (!ip)
+            errorf("Default value for IC_COMBINE_CHARSET_AS_STRING is not supported.\n");
+        get_charset(&result, true, ip->combine_cset);
+        break;
+
+    case IC_COMBINE_CHARSET_AS_ARRAY:
+        if (!ip)
+            errorf("Default value for IC_COMBINE_CHARSET_AS_ARRAY is not supported.\n");
+        get_charset(&result, false, ip->combine_cset);
+        break;
+
+    case IC_CONNECTION_CHARSET_AS_STRING:
+        if (!ip)
+            errorf("Default value for IC_CONNECTION_CHARSET_AS_STRING is not supported.\n");
+        get_charset(&result, true, ip->charset);
+        break;
+
+    case IC_CONNECTION_CHARSET_AS_ARRAY:
+        if (!ip)
+            errorf("Default value for IC_CONNECTION_CHARSET_AS_ARRAY is not supported.\n");
+        get_charset(&result, false, ip->charset);
+        break;
+
+    case IC_QUOTE_IAC:
+        if (!ip)
+            errorf("Default value for IC_QUOTE_IAC is not supported.\n");
+        put_number(&result, ip->quote_iac != 0);
+        break;
+
+    case IC_TELNET_ENABLED:
+        if (!ip)
+            errorf("Default value for IC_TELNET_ENABLED is not supported.\n");
+        put_number(&result, ip->tn_enabled != 0);
+        break;
+
+#ifdef USE_MCCP
+    case IC_MCCP:
+        if (!ip)
+            errorf("Default value for IC_MCCP is not supported.\n");
+
+        put_number(&result, ip->compressing);
+        break;
+#endif /* USE_MCCP*/
+
+    case IC_PROMPT:
+        if (!ip)
+            errorf("Default value for IC_PROMPT is not supported.\n");
+
+        assign_svalue_no_free(&result, &ip->prompt);
+        break;
+
+    case IC_MAX_COMMANDS:
+        if (!ip)
+            errorf("Default value for IC_MAX_COMMANDS is not supported.\n");
+
+        put_number(&result, ip->maxNumCmds);
+        break;
+
+    case IC_MODIFY_COMMAND:
+        if (!ip)
+            errorf("Default value for IC_MODIFY_COMMAND is not supported.\n");
+
+        if (ip->modify_command)
+            put_ref_object(&result, ip->modify_command, "interactive_info(IC_MODIFY_COMMAND)");
+        else
+            put_number(&result, 0);
+        break;
+
+    /* Connection information */
+    case II_IP_NAME:
+#ifdef ERQ_DEMON
+        {
+            string_t * hname;
+
+            hname = lookup_ip_entry(ip->addr.sin_addr, MY_FALSE);
+            if (hname)
+            {
+                put_ref_string(&result, hname);
+                break;
+            }
+        }
+#endif
+        /* FALLTHROUGH */
+
+    case II_IP_NUMBER:
+        {
+            string_t *haddr;
+
+#ifndef USE_IPV6
+            haddr = new_mstring(inet_ntoa(ip->addr.sin_addr));
+#else
+            haddr = new_mstring(inet6_ntoa(ip->addr.sin_addr));
+#endif
+
+            if (!haddr)
+                errorf("Out of memory for IP address\n");
+
+            put_string(&result, haddr);
+            break;
+        }
+
+    case II_IP_PORT:
+        put_number(&result, ntohs(ip->addr.sin_port));
+        break;
+
+    case II_IP_ADDRESS:
+        {
+            vector_t *v;
+            svalue_t *svp;
+            unsigned char *cp;
+            int i;
+
+            v = allocate_array(sizeof ip->addr);
+
+            if (!v)
+                errorf("Out of memory for IP address\n");
+
+            svp = v->item;
+            cp = (unsigned char*)&ip->addr;
+            for (i = sizeof ip->addr; --i;)
+            {
+                put_number(svp, *cp);
+                cp++;
+                svp++;
+            }
+            put_array(&result, v);
+            break;
+        }
+
+    case II_MUD_PORT:
+        {
+            struct sockaddr_in addr;
+            length_t length = sizeof(addr);
+
+            getsockname(ip->socket, (struct sockaddr *)&addr, &length);
+            put_number(&result, ntohs(addr.sin_port));
+            break;
+        }
+
+#ifdef USE_MCCP
+    /* Telnet related information */
+    case II_MCCP_STATS:
+        if (ip->compressing > 0)
+        {
+            vector_t *mccp_stats;
+            mccp_stats = allocate_uninit_array(2);
+            put_number(mccp_stats->item,     ip->out_compress->total_in);
+            put_number(mccp_stats->item + 1, ip->out_compress->total_out);
+            put_array(&result, mccp_stats);
+        }
+        else
+        {
+            put_number(&result, 0);
+        }
+        break;
+#endif /* USE_MCCP*/
+
+    /* Input handling */
+    case II_INPUT_PENDING:
+        {
+            input_t *ih = get_input_handler(ip, INPUT_TO);
+            put_number(&result, 0);
+
+            if (ih)
+            {
+                object_t *cb = callback_object(&(((input_to_t*)ih)->fun));
+                if (cb)
+                    put_ref_object(&result, cb, "interactive_info(II_INPUT_PENDING)");
+            }
+        }
+        break;
+
+    case II_EDITING:
+        {
+            input_t *ih = get_input_handler(ip, INPUT_ED);
+            put_number(&result, 0);
+
+            if (ih)
+            {
+                object_t *ed = get_ed_object(ih);
+                if (ed)
+                    put_ref_object(&result, ed, "interactive_info(II_EDITING)");
+                else
+                    put_number(&result, 1);
+            }
+        }
+        break;
+
+    case II_IDLE:
+        put_number(&result, current_time - ip->last_time);
+        break;
+
+    /* Output handling */
+    case II_SNOOP_NEXT:
+        put_number(&result, 0);
+
+        if (!valid_query_snoop(ob))
+            break;
+
+        if (ip->snoop_by)
+            put_ref_object(&result, ip->snoop_by, "interactive_info(II_SNOOP_NEXT)");
+        break;
+
+    case II_SNOOP_PREV:
+        put_number(&result, 0);
+
+        if (!ip->snoop_on)
+            break;
+
+        if (!valid_query_snoop(ip->snoop_on->ob))
+            break;
+
+        if (ip->snoop_on)
+            put_ref_object(&result, ip->snoop_on->ob, "interactive_info(II_SNOOP_PREV)");
+        break;
+
+    case II_SNOOP_ALL:
+        {
+            int num = 0, pos = 0;
+            object_t *snooper = ip->snoop_by;
+            object_t *victim = ob;
+            vector_t *vec;
+
+            while (snooper && valid_query_snoop(victim))
+            {
+                interactive_t * snooper_ip;
+                num++;
+
+                if (!O_SET_INTERACTIVE(snooper_ip, snooper))
+                    break;
+                victim = snooper;
+                snooper = snooper_ip->snoop_by;
+            }
+
+            vec = allocate_array(num);
+            snooper = ip->snoop_by;
+            while (snooper && pos < num)
+            {
+                interactive_t * snooper_ip;
+                put_ref_object(vec->item + pos, snooper, "interactive_info(II_SNOOP_ALL)");
+                pos++;
+
+                if (!O_SET_INTERACTIVE(snooper_ip, snooper))
+                    break;
+                snooper = snooper_ip->snoop_by;
+            }
+
+            put_array(&result, vec);
+            break;
+        }
+    }
+
+    sp = pop_n_elems(2, sp);
+
+    sp++;
+    *sp = result;
+    return sp;
+} /* f_interactive_info() */
 
 /***************************************************************************/
