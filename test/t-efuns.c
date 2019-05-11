@@ -464,10 +464,14 @@ mixed *tests = ({
         (: deep_eq(json_parse(json_serialize( ([]) ) ), ([]) ) :) }),
     ({ "json_parse/_serialize 7", 0,
         (: deep_eq(json_parse(json_serialize( json_testdata ) ), json_testdata) :) }),
+#if 0
+    // Older versions of json-c write floats as integers,
+    // resulting in wrong values when serializing back.
     ({ "json_parse/_serialize 8", 0,
-        (: json_parse(json_serialize(__FLOAT_MAX__) ) == __FLOAT_MAX__:) }),
-//    ({ "json_parse/_serialize 9", 0,
-//        (: json_parse(json_serialize(__FLOAT_MIN__) ) == __FLOAT_MIN__ :) }),
+        (: json_parse(json_serialize(__FLOAT_MAX__) ) == __FLOAT_MAX__ :) }),
+    ({ "json_parse/_serialize 9", 0,
+        (: json_parse(json_serialize(__FLOAT_MIN__) ) == __FLOAT_MIN__ :) }),
+#endif
 #if __INT_MAX__ <= 2147483647
     // 64 bit values work on only few systems with a very new json-c library.
     ({ "json_parse/_serialize 10", 0,
