@@ -611,7 +611,11 @@ int	found_err;
 /* Signal an error.  LEVEL is nonzero if it is an error (as opposed to
    a warning.  MSG is a printf-style format string.  Additional
    arguments are additional arguments for printf.  */
-diag(level, msg, a, b)
+diag(level,msg, a, b)
+	int level;
+	const char *msg;
+	int a;
+	int b;
 {
     if (level)
 	found_err = 1;
