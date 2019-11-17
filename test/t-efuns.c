@@ -215,6 +215,28 @@ mixed *tests = ({
     ({ "call_direct_resolved array 3",  0, (: int* result; return deep_eq(call_direct_resolved(&result, ({clone,clone,object_name(clone),this_object(),0}), "h", 10, ({ 20 })), ({0, 0, 0, 0, 0})) && deep_eq(result, ({  0,  0,  0,  0, 0})); :) }),
     ({ "crypt", TF_ERROR,  (: crypt("ABC", "$$") :) }),
     ({ "ctime", TF_DONTCHECKERROR,  (: ctime(-1) :) }), /* This must be the first ctime call of this test suite. */
+    ({ "clone_object 1", 0,
+        (:
+            /* Check that our arguments went into the new object. */
+            set_driver_hook(H_CREATE_CLONE, "create_clone");
+
+            object o = clone_object(this_object(), 42, 10);
+            mixed res = o->get_args();
+            destruct(o);
+            return res == 52;
+        :)
+    }),
+    ({ "clone_object 2", 0,
+        (:
+            /* Check that our arguments went into the new object. */
+            set_driver_hook(H_CREATE_CLONE, unbound_lambda(({'ob, 'arg1, 'arg2}), ({#'call_other, 'ob, "create_clone", 'arg1, 20})));
+
+            object o = clone_object(this_object(), 42, 10);
+            mixed res = o->get_args();
+            destruct(o);
+            return res == 62;
+        :)
+    }),
     ({ "save_object 1", 0, (: stringp(save_object()) :) }), /* Bug #594 */
     ({ "strstr 01", 0, (: strstr("","") == 0 :) }), /* Bug #536 */
     ({ "strstr 02", 0, (: strstr("","", 1) == -1 :) }),
@@ -655,4 +677,16 @@ string *epilog(int eflag)
 int f(int arg)
 {
     return arg + 1;
+}
+
+// For the clone_object test.
+int args;
+void create_clone(int arg1, int arg2)
+{
+    args = arg1 + arg2;
+}
+
+int get_args()
+{
+    return args;
 }
