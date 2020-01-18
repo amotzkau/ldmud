@@ -47,7 +47,7 @@
 
 /* --- Type declarations --- */
 typedef struct ldmud_gc_var_s ldmud_gc_var_t;
-typedef void (*CClosureFun)(void*);
+typedef void (*CClosureFun)(int,void*);
 typedef struct python_poll_fds_s python_poll_fds_t;
 typedef struct python_hook_s python_hook_t;
 
@@ -125,7 +125,7 @@ static PyObject * python_contextvar_command_giver = NULL;
 static const char* python_to_svalue(svalue_t *dest, PyObject* val);
 static PyObject* svalue_to_python (svalue_t *svp);
 static bool python_eq_svalue(PyObject* pval, svalue_t *sval);
-static bool call_lpc_secure(CClosureFun fun, void* data);
+static bool call_lpc_secure(CClosureFun fun, int num_arg, void* data);
 static void python_save_context();
 static void python_clear_context();
 static void python_restore_context();
@@ -645,7 +645,7 @@ struct ldmud_object_init_closure_s
 };
 
 static void
-ldmud_object_init_getobject(struct ldmud_object_init_closure_s* data)
+ldmud_object_init_getobject (int num_arg UNUSED, struct ldmud_object_init_closure_s* data)
 
 /* Helper function for ldmud_object_init().
  */
@@ -683,7 +683,7 @@ ldmud_object_init (ldmud_object_t *self, PyObject *args, PyObject *kwds)
     else
     {
         /* get_object() can throw errors, we don't want to jump out of this context. */
-        call_lpc_secure((CClosureFun)ldmud_object_init_getobject, &data);
+        call_lpc_secure((CClosureFun)ldmud_object_init_getobject, 0, &data);
         free_mstring(data.filename);
 
         if(data.ob)
@@ -3212,22 +3212,15 @@ ldmud_closure_richcompare (ldmud_closure_t *self, PyObject *other, int op)
 }
 
 /*-------------------------------------------------------------------------*/
-
-struct ldmud_closure_call_closure_s
-{
-    ldmud_closure_t *closure;
-    int num_arg;
-};
-
 static void
-ldmud_closure_call_closure(struct ldmud_closure_call_closure_s* data)
+ldmud_closure_call_closure (int num_arg, ldmud_closure_t* closure)
 
 /* Helper function for ldmud_closure_call().
  */
 
 {
-    call_lambda(&data->closure->lpc_closure, data->num_arg);
-} /* ldmud_closure_call_getobject */
+    call_lambda(&closure->lpc_closure, num_arg);
+} /* ldmud_closure_call_closure() */
 
 
 static PyObject*
@@ -3248,10 +3241,10 @@ ldmud_closure_call(ldmud_closure_t *cl, PyObject *arg, PyObject *kw)
     {
         svalue_t *sp = inter_sp;
         PyObject *result;
-        struct ldmud_closure_call_closure_s data = { cl, (int)PyTuple_GET_SIZE(arg)};
+        int num_arg = (int)PyTuple_GET_SIZE(arg);
 
         /* Put all arguments on the stack. */
-        for (int i = 0; i < data.num_arg; i++)
+        for (int i = 0; i < num_arg; i++)
         {
             const char* err = python_to_svalue(++sp, PyTuple_GetItem(arg, i));
             if (err != NULL)
@@ -3264,7 +3257,7 @@ ldmud_closure_call(ldmud_closure_t *cl, PyObject *arg, PyObject *kw)
 
         inter_sp = sp;
 
-        if(call_lpc_secure((CClosureFun)ldmud_closure_call_closure, &data))
+        if(call_lpc_secure((CClosureFun)ldmud_closure_call_closure, num_arg, cl))
         {
             result = svalue_to_python(inter_sp);
             pop_stack();
@@ -3943,22 +3936,22 @@ ldmud_efun_hash (ldmud_efun_t *val)
 }
 
 /*-------------------------------------------------------------------------*/
-
-struct ldmud_efun_call_closure_s
-{
-    svalue_t efun_closure;
-    int num_arg;
-};
-
 static void
-ldmud_efun_call_efun(struct ldmud_efun_call_closure_s* data)
+ldmud_efun_call_efun (int num_arg, ldmud_efun_t *func)
 
 /* Helper function for ldmud_efun_call().
  */
 
 {
-    call_lambda(&data->efun_closure, data->num_arg);
-} /* ldmud_efun_call_getobject */
+    /* We construct a efun closure, so we don't need to duplicate
+     * code from call_lambda.
+     */
+    svalue_t efun_closure = { T_CLOSURE };
+    efun_closure.x.closure_type = (short)(func->efun_idx + CLOSURE_EFUN);
+    efun_closure.u.ob = current_object == NULL ? master_ob : current_object;
+
+    call_lambda(&efun_closure, num_arg);
+} /* ldmud_efun_call_efun() */
 
 
 static PyObject*
@@ -3980,19 +3973,10 @@ ldmud_efun_call(ldmud_efun_t *func, PyObject *arg, PyObject *kw)
     {
         svalue_t *sp = inter_sp;
         PyObject *result;
-
-        /* We construct a efun closure, so we don't need to duplicate
-         * code from call_lambda.
-         */
-        struct ldmud_efun_call_closure_s data = { { T_CLOSURE}, (int)PyTuple_GET_SIZE(arg)};
-
-        data.efun_closure.x.closure_type = (short)(func->efun_idx + CLOSURE_EFUN);
-        if (python_is_external)
-            python_restore_context();
-        data.efun_closure.u.ob = current_object == NULL ? master_ob : current_object;
+        int num_arg = (int)PyTuple_GET_SIZE(arg);
 
         /* Put all arguments on the stack. */
-        for (int i = 0; i < data.num_arg; i++)
+        for (int i = 0; i < num_arg; i++)
         {
             const char* err = python_to_svalue(++sp, PyTuple_GetItem(arg, i));
             if (err != NULL)
@@ -4005,7 +3989,7 @@ ldmud_efun_call(ldmud_efun_t *func, PyObject *arg, PyObject *kw)
 
         inter_sp = sp;
 
-        if(call_lpc_secure((CClosureFun)ldmud_efun_call_efun, &data))
+        if(call_lpc_secure((CClosureFun)ldmud_efun_call_efun, num_arg, func))
         {
             result = svalue_to_python(inter_sp);
             pop_stack();
@@ -4690,9 +4674,11 @@ python_eq_svalue (PyObject* pval, svalue_t *sval)
 
 /*-------------------------------------------------------------------------*/
 static bool
-call_lpc_secure (CClosureFun fun, void* data)
+call_lpc_secure (CClosureFun fun, int num_arg, void* data)
 
 /* Call <fun>(<data>), but guard it against LPC errors.
+ * There are <num_arg> arguments on the stack, that will be
+ * removed automatically upon any errors.
  * Returns false if there happened an LPC error, true otherwise.
  * The error string will be set as a python exception.
  */
@@ -4707,7 +4693,7 @@ call_lpc_secure (CClosureFun fun, void* data)
     error_recovery_info.rt.type = ERROR_RECOVERY_APPLY;
     rt_context = (rt_context_t *)&error_recovery_info;
 
-    save_sp = inter_sp;
+    save_sp = inter_sp - num_arg;
     save_csp = csp;
 
     if (setjmp(error_recovery_info.con.text))
@@ -4730,7 +4716,7 @@ call_lpc_secure (CClosureFun fun, void* data)
             mark_start_evaluation();
         }
 
-        (*fun)(data);
+        (*fun)(num_arg, data);
         result = true;
 
         if(python_is_external)
