@@ -5399,7 +5399,7 @@ v_present_clone (svalue_t *sp, int num_arg)
             name0 = tmpbuf;
         
         /* Now make the name sane */
-        sane_name = (char *)make_name_sane(name0, !compat_mode);
+        sane_name = (char *)make_name_sane(name0, !compat_mode, false);
 
         if (sane_name)
             name = find_tabled_str(sane_name, STRING_UTF8);
