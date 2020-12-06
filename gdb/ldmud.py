@@ -214,10 +214,11 @@ class SValuePrinter:
     T_QUOTED_ARRAY                   = 0xa
     T_STRUCT                         = 0xb
     T_BYTES                          = 0xc
-    T_CALLBACK                       = 0xd
-    T_ERROR_HANDLER                  = 0xe
-    T_BREAK_ADDR                     = 0xf
-    T_NULL                           = 0x10
+    T_LWOBJECT                       = 0xd
+    T_CALLBACK                       = 0xe
+    T_ERROR_HANDLER                  = 0xf
+    T_BREAK_ADDR                     = 0x10
+    T_NULL                           = 0x11
 
     LVALUE_UNPROTECTED               = 0x00
     LVALUE_UNPROTECTED_CHAR          = 0x01
@@ -240,6 +241,7 @@ class SValuePrinter:
         T_QUOTED_ARRAY:                   "T_QUOTED_ARRAY",
         T_STRUCT:                         "T_STRUCT",
         T_BYTES:                          "T_BYTES",
+        T_LWOBJECT:                       "T_LWOBJECT",
         T_CALLBACK:                       "T_CALLBACK",
         T_ERROR_HANDLER:                  "T_ERROR_HANDLER",
         T_BREAK_ADDR:                     "T_BREAK_ADDR",
@@ -299,6 +301,8 @@ class SValuePrinter:
             return [(".u.vec", val["u"]["vec"])]
         elif stype == self.T_OBJECT:
             return [(".u.ob", val["u"]["ob"])]
+        elif stype == self.T_LWOBJECT:
+            return [(".u.lwob", val["u"]["lwob"])]
         elif stype == self.T_MAPPING:
             return [(".u.map", val["u"]["map"])]
         elif stype == self.T_FLOAT:
@@ -409,6 +413,9 @@ class TypePrinter:
     TYPE_QUOTED_ARRAY =  9
     TYPE_BYTES        = 10
 
+    OBJECT_REGULAR    =  0
+    OBJECT_LIGHTWEIGHT=  1
+
     type_names = {
         TYPE_UNKNOWN:      "unknown",
         TYPE_NUMBER:       "int",
@@ -452,10 +459,15 @@ class TypePrinter:
 
         elif tclass == self.TCLASS_OBJECT:
             progname = val["t_object"]["program_name"].dereference()
-            if progname.address == 0:
-                return "any object"
+            if int(val["t_object"]["type"]) == self.OBJECT_LIGHTWEIGHT:
+                lw = "lightweight "
+            else:
+                lw = ""
 
-            return 'object "%s"' % (progname["txt"].string(length = progname["size"]))
+            if progname.address == 0:
+                return "any %sobject" % (lw,)
+
+            return '%sobject "%s"' % (lw, progname["txt"].string(length = progname["size"]))
 
         elif tclass == self.TCLASS_ARRAY:
             return self.calc_name(val["t_array"]["base"].dereference()) + "*"*int(val["t_array"]["depth"])
@@ -516,6 +528,7 @@ ptr_printers = {
     'mapping_s':     MappingPrinter,
     'svalue_s':      SValuePrinter,
     'object_s':      lambda val: PtrNamePrinter(val, ["name"]),
+    'lwobject_s':    lambda val: PtrNamePrinter(val, ["prog", "name"]),
     'program_s':     lambda val: PtrNamePrinter(val, ["name"]),
     'interactive_s': lambda val: PtrNamePrinter(val, ["ob", "name"]),
     'wiz_list_s':    lambda val: PtrNamePrinter(val, ["name"]),
