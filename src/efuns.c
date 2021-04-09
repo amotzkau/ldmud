@@ -105,6 +105,7 @@
 #include "call_out.h"
 #include "closure.h"
 #include "comm.h"
+#include "coroutine.h"
 #include "dumpstat.h"
 #include "exec.h"
 #include "gcollect.h"
@@ -6331,6 +6332,14 @@ f_to_string (svalue_t *sp)
         break;
       }
 
+    case T_COROUTINE:
+      {
+        string_t * rc = coroutine_to_string(sp->u.coroutine);
+        free_svalue(sp);
+        put_string(sp, rc);
+        break;
+      }
+
     case T_SYMBOL:
       {
         /* Easy: the symbol value is a string */
@@ -7667,6 +7676,7 @@ v_get_type_info (svalue_t *sp, int num_arg)
     case T_CLOSURE:
         if (flag == 2)
         {
+            svalue_t cl = sp[-1];
             svalue_t ob;
 
             sp--;
@@ -7691,8 +7701,8 @@ v_get_type_info (svalue_t *sp, int num_arg)
                 ob = const0;
                 break;
             }
-            free_svalue(sp);
             assign_svalue_no_free(sp, &ob);
+            free_svalue(&cl);
             return sp;
             /* NOTREACHED */
         }
@@ -7747,6 +7757,62 @@ v_get_type_info (svalue_t *sp, int num_arg)
         secondary = argp->x.closure_type;
         if (secondary < CLOSURE_LWO) /* Mask the LWO flag. */
             secondary -= CLOSURE_LWO;
+        break;
+
+    case T_COROUTINE:
+        if (flag == 2)
+        {
+            coroutine_t *cr;
+
+            sp--;
+
+            cr = sp->u.coroutine;
+            assign_svalue_no_free(sp, &cr->ob);
+            free_coroutine(cr);
+            return sp;
+            /* NOTREACHED */
+        }
+        if (flag == 3)
+        {
+            coroutine_t *cr;
+            string_t *prog_name;
+
+            sp--;
+
+            cr = sp->u.coroutine;
+
+            memsafe(prog_name = mstring_cvt_progname(cr->prog->name MTRACE_ARG)
+                   , mstrsize(cr->prog->name)
+                   , "coroutine program name");
+
+            free_svalue(sp);
+            if (!prog_name)
+                put_number(sp, 0);
+            else
+                put_string(sp, prog_name);
+            return sp;
+            /* NOTREACHED */
+        }
+        if (flag == 4)
+        {
+            coroutine_t *cr;
+            string_t *function_name;
+
+            sp--;
+
+            cr = sp->u.coroutine;
+            function_name = ref_mstring(
+                cr->prog->function_headers[FUNCTION_HEADER_INDEX(cr->funstart)].name);
+
+            free_svalue(sp);
+            if (!function_name)
+                put_number(sp, 0);
+            else
+                put_string(sp, function_name);
+            return sp;
+            /* NOTREACHED */
+        }
+        secondary = -1;
         break;
 
     case T_SYMBOL:
@@ -8058,6 +8124,7 @@ v_member (svalue_t *sp, int num_arg)
             case T_MAPPING:
             case T_OBJECT:
             case T_LWOBJECT:
+            case T_COROUTINE:
             case T_POINTER:
             case T_STRUCT:
               {
@@ -8362,6 +8429,7 @@ v_rmember (svalue_t *sp, int num_arg)
         case T_MAPPING:
         case T_OBJECT:
         case T_LWOBJECT:
+        case T_COROUTINE:
         case T_POINTER:
         case T_STRUCT:
           {
