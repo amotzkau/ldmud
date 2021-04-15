@@ -7652,6 +7652,7 @@ delete_prog_string (void)
         ident_t *  name;   /* A corresponding variable to be marked. */
         fulltype_t type;   /* Type of the expression */
         uint32     start;  /* Startaddress of the expression */
+        bool       needs_use; /* Warn, when not used. */
     } rvalue;
       /* Just a simple expression. */
 
@@ -7660,6 +7661,7 @@ delete_prog_string (void)
         ident_t *      name;     /* A corresponding variable to be marked. */
         fulltype_t     type;     /* Type of the expression */
         uint32         start;    /* Startaddress of the instruction */
+        bool           needs_use;/* Warn, when not used. */
         lvalue_block_t lvalue;   /* Code of the expression as an lvalue */
     }
     lrvalue;
@@ -7685,6 +7687,7 @@ delete_prog_string (void)
         fulltype_t type;         /* Type of the expression         */
         uint32     start;        /* Startaddress of the expression */
         bool       might_lvalue; /* Might be an lvalue reference.  */
+        bool       needs_use;    /* Warn, when not used.           */
     } function_call_result;
       /* A function call expression. */
 
@@ -8393,8 +8396,9 @@ printf("DEBUG: After inline_opt_context: program size %"PRIuMPINT"\n", CURRENT_P
 printf("DEBUG: After inline block: program size %"PRIuMPINT"\n", CURRENT_PROGRAM_SIZE);
 #endif /* DEBUG_INLINES */
          $$.start = $<address>6;
-         $$.type = get_fulltype($1 ? lpctype_coroutine : lpctype_closure);
+         $$.type = get_fulltype_flags($1 ? lpctype_coroutine : lpctype_closure, TYPE_MOD_LITERAL);
          $$.name = NULL;
+         $$.needs_use = true;
 
          copy_default_value_block($5.num_opt, $5.start, current_inline->start + $<number>8, $<number>8);
 
@@ -8467,8 +8471,9 @@ printf("DEBUG: After L_END_INLINE: program size %"PRIuMPINT"\n", CURRENT_PROGRAM
          leave_block_scope(MY_FALSE);
 
          $$.start = current_inline->end;
-         $$.type = get_fulltype(lpctype_closure);
+         $$.type = get_fulltype_flags(lpctype_closure, TYPE_MOD_LITERAL);
          $$.name = NULL;
+         $$.needs_use = true;
 
          complete_inline_closure((struct statement_s)
                                  {
@@ -9353,6 +9358,7 @@ opt_default_value:
         $$.start = UINT32_MAX;
         $$.name = NULL;
         $$.type = get_fulltype(NULL);
+        $$.needs_use = false;
       }
     | L_ASSIGN expr0
       {
@@ -9363,6 +9369,7 @@ opt_default_value:
         $$.start = $2.start;
         $$.name = $2.name;
         $$.type = $2.type;
+        $$.needs_use = false;
         free_lvalue_block($2.lvalue);
       }
 ; /* opt_default_value */
@@ -9593,6 +9600,8 @@ statement:
               ins_f_code(F_BREAK_POINT);
 #endif /* F_BREAK_POINT */
 
+          if (pragma_warn_unused_values && $1.needs_use)
+              yywarnf("Unused %s value", get_fulltype_name($1.type));
           free_fulltype($1.type);
 
           if (CURRENT_PROGRAM_SIZE > $1.start)
@@ -11349,10 +11358,13 @@ comma_expr:
         $$.start = $1.start;
         $$.type = $1.type;
         $$.name = $1.name;
+        $$.needs_use = $1.needs_use;
         free_lvalue_block($1.lvalue);
       }
     | comma_expr
       {
+          if (pragma_warn_unused_values && $1.needs_use)
+              yywarnf("Unused %s value", get_fulltype_name($1.type));
           insert_pop_value();
       }
 
@@ -11362,6 +11374,7 @@ comma_expr:
           $$.start = $1.start;
           $$.type = $4.type;
           $$.name = $4.name;
+          $$.needs_use = $4.needs_use;
 
           free_fulltype($1.type);
           free_lvalue_block($4.lvalue);
@@ -11375,6 +11388,7 @@ opt_expr:
           $$.start = last_expression = CURRENT_PROGRAM_SIZE;
           $$.type = get_fulltype(lpctype_mixed);
           $$.name = NULL;
+          $$.needs_use = false;
           ins_f_code(F_CONST0);
       }
     | ',' expr0
@@ -11382,6 +11396,7 @@ opt_expr:
           $$.start = $2.start;
           $$.type = $2.type;
           $$.name = $2.name;
+          $$.needs_use = $2.needs_use;
           free_lvalue_block($2.lvalue);
       }
 ; /* opt_expr */
@@ -11446,6 +11461,7 @@ expr0:
 %line
           $$ = $4;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = false;
 
           free_lvalue_block($4.lvalue);
 
@@ -11646,6 +11662,7 @@ expr0:
           $$.type.t_type = lpctype_mixed;
           $$.type.t_flags = 0;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = false;
           free_fulltype($3.type);
           free_lvalue_block($3.lvalue);
       }
@@ -11756,6 +11773,7 @@ expr0:
           $$.type = get_fulltype(get_union_type(type1.t_type, type2.t_type));
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = $4.needs_use && $7.needs_use;
 
           use_variable($4.name, VAR_USAGE_READ);
           use_variable($7.name, VAR_USAGE_READ);
@@ -11795,6 +11813,7 @@ expr0:
           $$.type.t_flags = 0;
           $$.name = $4.name;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = $4.needs_use;
 
           free_fulltype($1.type);
           free_fulltype($4.type);
@@ -11828,6 +11847,7 @@ expr0:
           $$.type = $4.type; /* It's the second value or zero. */
           $$.name = $4.name;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = $4.needs_use;
 
           free_fulltype($1.type);
           free_lvalue_block($4.lvalue);
@@ -11843,6 +11863,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -11864,6 +11885,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -11885,6 +11907,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -11923,6 +11946,7 @@ expr0:
           $$.type = get_fulltype(lpctype_int);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -11951,6 +11975,7 @@ expr0:
           $$.type = get_fulltype(lpctype_int);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -11983,6 +12008,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12002,6 +12028,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12021,6 +12048,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12040,6 +12068,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12062,6 +12091,7 @@ expr0:
           $$.type = get_fulltype(lpctype_int);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12083,6 +12113,7 @@ expr0:
           $$.type = get_fulltype(lpctype_int);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12104,6 +12135,7 @@ expr0:
           $$.type = get_fulltype(lpctype_int);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12214,6 +12246,7 @@ expr0:
 
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($4.name, VAR_USAGE_READ);
@@ -12233,6 +12266,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12252,6 +12286,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12271,6 +12306,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12289,6 +12325,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           use_variable($3.name, VAR_USAGE_READ);
@@ -12450,6 +12487,7 @@ expr0:
           $$.type = get_fulltype(result);
           $$.name = $2.name;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = false;
 
           free_lpctype($2.type);
       }
@@ -12463,6 +12501,7 @@ expr0:
           ins_f_code(F_NOT);        /* Any type is valid here. */
           $$.type = get_fulltype(lpctype_int);
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           free_fulltype($2.type);
           free_lvalue_block($2.lvalue);
@@ -12480,6 +12519,7 @@ expr0:
           ins_f_code(F_COMPL);
           $$.type = get_fulltype(lpctype_int);
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           free_fulltype($2.type);
           free_lvalue_block($2.lvalue);
@@ -12520,6 +12560,7 @@ expr0:
           $$ = $2;
           $$.type = get_fulltype(check_unary_op_type($2.type.t_type, "unary '-'", types_unary_math, lpctype_mixed));
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
 
           free_fulltype($2.type);
           free_lvalue_block($2.lvalue);
@@ -12541,6 +12582,7 @@ expr0:
           $$.type = get_fulltype(check_unary_op_type($1.type, "++", types_unary_math, lpctype_mixed));
           $$.name = $1.name;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = false;
 
           free_lpctype($1.type);
       } /* post-inc */
@@ -12562,6 +12604,7 @@ expr0:
           $$.type = get_fulltype(check_unary_op_type($1.type, "--", types_unary_math, NULL));
           $$.name = $1.name;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = false;
 
           free_lpctype($1.type);
       } /* post-dec */
@@ -12587,6 +12630,7 @@ expr0:
           $$.type.t_flags |= TYPE_MOD_REFERENCE;
           $$.name = $1.name;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = true;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -12644,6 +12688,7 @@ expr0:
           $$.type = restype;
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
+          $$.needs_use = false;
 
           use_variable($3.name, VAR_USAGE_READ);
           if ($3.type.t_flags & TYPE_MOD_REFERENCE)
@@ -12707,12 +12752,16 @@ expr4:
            * just to be on the safe side.
            */
           if ($1.might_lvalue)
+          {
+              last_expression = CURRENT_PROGRAM_SIZE;
               ins_f_code(F_MAKE_RVALUE);
+          }
 
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.start =  $1.start;
           $$.type =   $1.type;
           $$.name =   NULL;
+          $$.needs_use = $1.needs_use;
       }
     | inline_func    %prec '~'
       {
@@ -12720,6 +12769,7 @@ expr4:
           $$.start =  $1.start;
           $$.type =   $1.type;
           $$.name =   NULL;
+          $$.needs_use = true;
       }
     | catch          %prec '~'
       {
@@ -12727,6 +12777,7 @@ expr4:
           $$.start =  $1.start;
           $$.type =   $1.type;
           $$.name =   NULL;
+          $$.needs_use = false;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -12742,6 +12793,7 @@ expr4:
           $$.type = get_fulltype_flags(lpctype_string, TYPE_MOD_LITERAL);
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
 
           ins_prog_string(p);
       }
@@ -12759,6 +12811,7 @@ expr4:
           $$.type = get_fulltype_flags(lpctype_bytes, TYPE_MOD_LITERAL);
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
       }
 
     | L_BYTES
@@ -12773,6 +12826,7 @@ expr4:
           $$.type = get_fulltype_flags(lpctype_bytes, TYPE_MOD_LITERAL);
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
 
           ins_prog_string(p);
       }
@@ -12789,6 +12843,7 @@ expr4:
           $$.start = last_expression = current = CURRENT_PROGRAM_SIZE;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
           number = $1;
           if ( number == 0 )
           {
@@ -12835,6 +12890,7 @@ expr4:
           $$.start = CURRENT_PROGRAM_SIZE;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
           if (!pragma_warn_deprecated)
               ins_byte(F_NO_WARN_DEPRECATED);
           ix = $1.number;
@@ -12942,6 +12998,7 @@ expr4:
           $$.start = CURRENT_PROGRAM_SIZE;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
           quotes = $1.quotes;
           string_number = store_prog_string($1.name);
           if (quotes == 1 && string_number < 0x100)
@@ -12968,6 +13025,7 @@ expr4:
           $$.start = CURRENT_PROGRAM_SIZE;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
           ins_f_code(F_FLOAT);
 #ifdef FLOAT_FORMAT_2
           ins_double($1);
@@ -12988,6 +13046,7 @@ expr4:
           $$.start = $2;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name = $3.name;
+          $$.needs_use = $3.needs_use;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -13003,6 +13062,7 @@ expr4:
           $$.start = $3;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -13025,6 +13085,7 @@ expr4:
           $$.start = $2;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
           quotes = $1;
           do {
                 ins_f_code(F_QUOTE);
@@ -13052,6 +13113,7 @@ expr4:
           $$.start = $4;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name = NULL;
+          $$.needs_use = true;
 
           free_fulltype($6.type);
           free_lvalue_block($6.lvalue);
@@ -13088,6 +13150,7 @@ expr4:
           $$.start = $3;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -13098,6 +13161,7 @@ expr4:
           $$.start = $3;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
       }
     | '(' '<' note_start error ')'
       {
@@ -13160,6 +13224,7 @@ expr4:
           $$.start = $6;
           $$.lvalue = (lvalue_block_t) {0, 0};
           $$.name =   NULL;
+          $$.needs_use = true;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -13287,6 +13352,7 @@ expr4:
           }
 
           $$.name = varident;
+          $$.needs_use = true;
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -13323,6 +13389,7 @@ expr4:
           /* Put that expression also into an lvalue buffer. */
           $$.lvalue = compose_lvalue_block((lvalue_block_t) {0, 0}, 0, $1.start, $2.strict_member ? F_S_INDEX_LVALUE : F_SX_INDEX_LVALUE);
           $$.name = NULL;
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
           ins_f_code($2.strict_member ? F_S_INDEX : F_SX_INDEX);
@@ -13359,6 +13426,7 @@ expr4:
           /* Check and compute the types */
           $$.type = get_fulltype(get_index_result_type($1.type.t_type, $2.type1, $2.rvalue_inst, lpctype_mixed));
           $$.name = NULL;
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
 
@@ -13395,6 +13463,7 @@ expr4:
           /* Check the types */
           $$.type = get_fulltype(check_unary_op_type($1.type.t_type, "range index", types_range_index, lpctype_mixed));
           $$.name = NULL;
+          $$.needs_use = true;
 
           use_variable($1.name, VAR_USAGE_READ);
 
@@ -13426,6 +13495,7 @@ expr4:
           $$.lvalue = compose_lvalue_block((lvalue_block_t) {0, 0}, 0, $1.start, F_MAP_INDEX_LVALUE);
           $$.type = get_fulltype(lpctype_mixed);
           $$.name = NULL;
+          $$.needs_use = true;
 
           ins_f_code(F_MAP_INDEX);
 
@@ -14663,6 +14733,7 @@ function_call:
 
           $$.start = $<function_call_head>2.start;
           $$.might_lvalue = true;
+          $$.needs_use = false;
 
           if ( $4 >= 0xff )
               /* since num_arg is encoded in just one byte, and 0xff
@@ -14741,7 +14812,11 @@ function_call:
                       CURRENT_PROGRAM_SIZE += 3;
                   }
                   if (funp->flags & TYPE_MOD_COROUTINE)
-                      $$.type = get_fulltype(lpctype_coroutine);
+                  {
+                      $$.type = get_fulltype_flags(lpctype_coroutine, TYPE_MOD_LITERAL);
+                      $$.might_lvalue = false;
+                      $$.needs_use = true;
+                  }
                   else
                       $$.type = get_fulltype(ref_lpctype(funp->type));
               } /* if (simul-efun) */
@@ -14823,7 +14898,11 @@ function_call:
 
                   /* Result type */
                   if (funp->flags & TYPE_MOD_COROUTINE)
-                      $$.type = get_fulltype(lpctype_coroutine);
+                  {
+                      $$.type = get_fulltype_flags(lpctype_coroutine, TYPE_MOD_LITERAL);
+                      $$.might_lvalue = false;
+                      $$.needs_use = true;
+                  }
                   else
                       $$.type = get_fulltype(ref_lpctype(funp->type));
 
@@ -15286,6 +15365,7 @@ function_call:
           ap_needed = MY_TRUE;
 
           $$.might_lvalue = true;
+          $$.needs_use = false;
 
           if (!disable_sefuns && sefun >= 0)
           {
@@ -15448,6 +15528,7 @@ function_call:
           $$.type = get_fulltype(lpctype_mixed);
           $$.start = $1;
           $$.might_lvalue = true;
+          $$.needs_use = false;
       }
 ; /* function_call */
 
@@ -15788,6 +15869,7 @@ catch:
           $$.start = origstart;
           $$.type  = get_fulltype(lpctype_string);
           $$.name  = NULL;
+          $$.needs_use = false;
       }
 ; /* catch */
 
@@ -16159,7 +16241,7 @@ insert_pop_value (void)
     else if (last_expression == CURRENT_PROGRAM_SIZE - sizeof(bytecode_t))
     {
          /* The following ops have no data in the bytecode. */
-        switch ( mem_block[A_PROGRAM].block[last_expression])
+        switch ( ((unsigned char*)mem_block[A_PROGRAM].block)[last_expression])
         {
                 /* The following ops have no data in the bytecode. */
             case F_ASSIGN:
@@ -16184,6 +16266,9 @@ insert_pop_value (void)
             case F_CONST1:
             case F_NCONST1:
                 mem_block[A_PROGRAM].current_size = last_expression;
+                break;
+            case F_MAKE_RVALUE:
+                mem_block[A_PROGRAM].block[last_expression] = F_POP_VALUE;
                 break;
             default:
                 ins_f_code(F_POP_VALUE);
