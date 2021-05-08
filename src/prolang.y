@@ -953,6 +953,10 @@ static bool arg_types_exhausted;
    * and a warning was already given about that.
    */
 
+static bool warned_deprecated_in;
+  /* Already warned about 'in' being deprecated as an identifier.
+   */
+
 static funflag_t default_varmod;
 static funflag_t default_funmod;
   /* Default visibility modifiers for variables resp. function.
@@ -2038,6 +2042,24 @@ get_sub_array_type (lpctype_t* t1, lpctype_t* t2)
     return ref_lpctype(t1);
 }
 
+static lpctype_t*
+is_array_member_type (lpctype_t* member, lpctype_t* array)
+
+/* This function checks whether <member> is a valid member
+ * type of <array>. If so, it returns the common member
+ * type, otherwise this function fails.
+ */
+
+{
+    lpctype_t *common;
+    lpctype_t *element = get_array_member_type(array);
+
+    common = get_common_type(member, element);
+
+    free_lpctype(element);
+
+    return common;
+}
 
 static lpctype_t*
 get_first_type (lpctype_t* t1, lpctype_t* t2)
@@ -2049,6 +2071,15 @@ get_first_type (lpctype_t* t1, lpctype_t* t2)
     return ref_lpctype(t1);
 }
 
+static lpctype_t*
+get_first_array_type (lpctype_t* t1, lpctype_t* t2)
+
+/* Return an array of <t1> as the result type in the type table.
+ */
+
+{
+    return get_array_type(t1);
+}
 
 static lpctype_t*
 get_second_type (lpctype_t* t1, lpctype_t* t2)
@@ -2191,6 +2222,27 @@ binary_op_types_t types_equality[] = {
     { &_lpctype_mixed,     &_lpctype_mixed,     &_lpctype_int,     &get_common_type      , NULL                   , NULL                   },
     { &_lpctype_int,       &_lpctype_float,     &_lpctype_int,     NULL                  , NULL                   , NULL                   },
     { &_lpctype_float,     &_lpctype_int,       &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { NULL, NULL, NULL, NULL, NULL, NULL }
+};
+
+/* Operator type table for membership tests.
+ */
+binary_op_types_t types_in[] = {
+    { &_lpctype_mixed,     &_lpctype_any_array, &_lpctype_int,     &is_array_member_type , &get_first_array_type  , NULL                   },
+    { &_lpctype_mixed,     &_lpctype_mapping,   &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { &_lpctype_int,       &_lpctype_string,    &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { &_lpctype_int,       &_lpctype_bytes,     &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { &_lpctype_string,    &_lpctype_string,    &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { &_lpctype_bytes,     &_lpctype_bytes,     &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { NULL, NULL, NULL, NULL, NULL, NULL }
+};
+
+/* Operator type table for comparisons.
+ */
+binary_op_types_t types_comparison[] = {
+    { &_lpctype_int_float, &_lpctype_int_float, &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { &_lpctype_string,    &_lpctype_string,    &_lpctype_int,     NULL                  , NULL                   , NULL                   },
+    { &_lpctype_bytes,     &_lpctype_bytes,     &_lpctype_int,     NULL                  , NULL                   , NULL                   },
     { NULL, NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -4310,6 +4362,21 @@ leave_block_scope (Bool dontclobber)
         }
 } /* leave_block_scope() */
 
+/*-------------------------------------------------------------------------*/
+static void
+check_identifier (ident_t *name)
+
+/* Check the used identifier for deprecated names.
+ */
+
+{
+    if (pragma_warn_deprecated && !warned_deprecated_in && mstreq(name->name, STR_IN))
+    {
+        warned_deprecated_in = true;
+        yywarn("Usage of 'in' as an identifier is deprecated, it will be a reserved word in future versions");
+    }
+} /* check_identifier() */
+
 
 /* ======================   GLOBALS and FUNCTIONS   ====================== */
 
@@ -5536,7 +5603,7 @@ def_function_prototype (int num_args, Bool is_inline)
 
 /*-------------------------------------------------------------------------*/
 static void
-def_function_complete ( p_int body_start, Bool is_inline)
+def_function_complete (bool has_code, p_uint body_start, struct statement_s statements, bool is_inline)
 
 /* Called after completely parsing a function definition,
  * this function updates the function header and closes all scopes..
@@ -5566,7 +5633,7 @@ def_function_complete ( p_int body_start, Bool is_inline)
         num_args = def_function_num_args;
     }
 
-    if (body_start < 0)
+    if (!has_code)
     {
         /* function_body was a ';' -> prototype
          * Just norm the visibility flags unless it is a prototype
@@ -5608,22 +5675,13 @@ def_function_complete ( p_int body_start, Bool is_inline)
             )
            )
         {
-            /* Check if the previous instruction is a RETURN, or
+            /* Check if the statement block has a return, or
              * at least a non-continuing instruction.
              */
-            bytecode_t last = F_ILLEGAL;
-
-            if (CURRENT_PROGRAM_SIZE > body_start + FUNCTION_HDR_SIZE)
-                last = PROGRAM_BLOCK[CURRENT_PROGRAM_SIZE-1];
-
-            if (F_RETURN == last || F_RETURN0 == last
-             || F_RAISE_ERROR == last || F_THROW == last
-               )
+            if (!statements.may_finish)
             {
-                /* Good, the last instruction seems to be a 'return'.
-                 * But just in case we're looking at the data field
-                 * of a different opcode or a conditional return: insert a
-                 * proper default return as well.
+                /* Good. Just in case our information is wrong,
+                 * insert a proper default return as well.
                  */
                 if (pragma_warn_missing_return)
                     ins_f_code(F_DEFAULT_RETURN);
@@ -6982,7 +7040,7 @@ printf("DEBUG:   program size: %"PRIuMPINT" align to %"PRIuMPINT"\n",
 
 /*-------------------------------------------------------------------------*/
 static void
-complete_inline_closure ( void )
+complete_inline_closure (struct statement_s statements)
 
 /* Called after parsing 'func <type> <arguments> <block>', this function
  * updates the function header and moves the closure into the pending
@@ -7024,7 +7082,7 @@ printf("DEBUG:           current depth: %d: %d\n", block_depth, block_scope[bloc
 
     /* Generate the function header and update the ident-table entry.
      */
-    def_function_complete(start, MY_TRUE);
+    def_function_complete(true, start, statements, true);
 
     current_inline->length = CURRENT_PROGRAM_SIZE - start;
 
@@ -7451,6 +7509,35 @@ delete_prog_string (void)
     p_uint address;
       /* Address of an instruction. */
 
+    struct statement_s statement;
+      /* Information about a statement or block of statements.
+       */
+
+    struct
+    {
+        struct statement_s statements;
+        bool has_default;
+    } switch_block;
+      /* Information about a switch label and its statements.
+       */
+
+    struct
+    {
+        p_uint address;          /* Address of the code for the else block. */
+        struct statement_s statements; /* Information about the statements. */
+    } else_block;
+      /* Information about an else block.
+       */
+
+    struct
+    {
+        struct statement_s statements; /* Information about the statements. */
+        p_uint address;                /* Starting address. */
+        bool has_code;                 /* false for a declaration. */
+    } function_block;
+      /* Information about a function body.
+       */
+
     struct {
         bytecode_p     p;       /* The condition code */
         unsigned short length;  /* Length of the condition code */
@@ -7689,9 +7776,12 @@ delete_prog_string (void)
 %type <typeflags>    inheritance_modifier_list inheritance_modifier
 %type <lpctype>      inline_opt_type
 %type <lpctype>      decl_cast cast
+%type <statement>    statement statements statements_block block inline_block inline_comma_expr cond while do for foreach switch return
+%type <switch_block> switch_block switch_statements
 %type <address>      note_start new_arg_name
 %type <rvalue>       comma_expr opt_default_value
 %type <function_arguments> argument argument_list inline_opt_args
+%type <function_block> function_body
 %type <lrvalue>      expr4 expr0
 %type <rvalue>       inline_func
 %type <rvalue>       catch
@@ -7700,7 +7790,7 @@ delete_prog_string (void)
 %type <foreach_expression> foreach_expr
 %type <index>        index_range index_expr
 %type <case_label>   case_label
-%type <address>      optional_else
+%type <else_block>   optional_else
 %type <string>       anchestor
 %type <sh_string>    call_other_name identifier
 %type <lpctype>      member_name_list
@@ -7713,8 +7803,8 @@ delete_prog_string (void)
 
 /* Special uses of <number> */
 
-%type <number> function_body
-  /* program address or -1 */
+%type <number> switch_label
+  /* 1 for default, 0 otherwise. */
 
 %type <number> expr_list arg_expr arg_expr_list arg_expr_list2 expr_list2
   /* Number of expressions in an expression list */
@@ -7757,7 +7847,7 @@ delete_prog_string (void)
 %left     '|'
 %left     '^'
 %left     '&'
-%left     L_EQ    L_NE
+%left     L_EQ    L_NE  L_IDENTIFIER
 %left     '<'     L_LE  '>' L_GE
 %left     L_LSH   L_RSH L_RSHL
 %left     '+'     '-'
@@ -7793,6 +7883,7 @@ note_start: { $$ = CURRENT_PROGRAM_SIZE; };
 def:  type L_IDENTIFIER  /* Function definition or prototype */
 
       {
+          check_identifier($2);
           def_function_typecheck($1, $2, MY_FALSE);
       }
 
@@ -7842,16 +7933,18 @@ def:  type L_IDENTIFIER  /* Function definition or prototype */
       function_body
 
       {
-          p_int offset = $8;
+          p_uint offset = $8.address;
 
-          if ($8 < 0 && $5.num_opt > 0)
+          if (!$8.has_code && $5.num_opt > 0)
           {
               /* It is just a prototype, but it has default values.
                * Record the position for the implementation later on.
                */
               int fnum = def_function_ident->u.global.function;
 
-              if (RESERVE_DEFAULT_VALUE_POS(fnum - DEFAULT_VALUES_POS_COUNT + 1))
+              if (fnum < DEFAULT_VALUES_POS_COUNT)
+                  DEFAULT_VALUES_POS(fnum) = $5.start;
+              else if (RESERVE_DEFAULT_VALUE_POS(fnum - DEFAULT_VALUES_POS_COUNT + 1))
               {
                   for (int i = DEFAULT_VALUES_POS_COUNT; i < fnum; i++)
                       ADD_DEFAULT_VALUE_POS(-1);
@@ -7862,7 +7955,7 @@ def:  type L_IDENTIFIER  /* Function definition or prototype */
               /* Undo the space reservation. */
               CURRENT_PROGRAM_SIZE = $<address>3;
           }
-          else if ($8 >= 0 && $<number>7)
+          else if ($8.has_code && $<number>7)
           {
               /* Now we need to copy the initialization into the program code. */
               int fnum = def_function_ident->u.global.function;
@@ -7877,7 +7970,7 @@ def:  type L_IDENTIFIER  /* Function definition or prototype */
                   DEFAULT_VALUES_POS(fnum) = -1;
           }
 
-          def_function_complete(offset, MY_FALSE);
+          def_function_complete($8.has_code, offset, $8.statements, false);
 
           insert_pending_inline_closures();
           free_fulltype($1);
@@ -7903,7 +7996,7 @@ function_body:
       {
 %line
           CURRENT_PROGRAM_SIZE = align(CURRENT_PROGRAM_SIZE);
-          $<number>$ = CURRENT_PROGRAM_SIZE;
+          $<address>$ = CURRENT_PROGRAM_SIZE;
           if (realloc_a_program(FUNCTION_HDR_SIZE))
           {
               CURRENT_PROGRAM_SIZE += FUNCTION_HDR_SIZE;
@@ -7918,9 +8011,18 @@ function_body:
 
       block
 
-      { $$ = $<number>1; }
+      {
+          $$.has_code = true;
+          $$.address = $<address>1;
+          $$.statements = $2;
+      }
 
-    | ';' { $$ = -1; }
+    | ';'
+      {
+          $$.has_code = false;
+          $$.address = 0;
+          $$.statements = (struct statement_s){ .may_return = false, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = true, .warned_dead_code = false };
+      }
 ; /* function_body */
 
 
@@ -8062,7 +8164,7 @@ printf("DEBUG: After inline block: program size %"PRIuMPINT"\n", CURRENT_PROGRAM
 
          copy_default_value_block($4.num_opt, $4.start, current_inline->start + $<number>7, $<number>7);
 
-         complete_inline_closure();
+         complete_inline_closure($8);
          free_lpctype($2);
       }
 
@@ -8127,7 +8229,15 @@ printf("DEBUG: After L_END_INLINE: program size %"PRIuMPINT"\n", CURRENT_PROGRAM
          $$.type = get_fulltype(lpctype_closure);
          $$.name = NULL;
 
-         complete_inline_closure();
+         complete_inline_closure((struct statement_s)
+                                 {
+                                    .may_return =       $3.may_return       || $4.may_return,
+                                    .may_break =        $3.may_break        || $4.may_break,
+                                    .may_continue =     $3.may_continue     || $4.may_continue,
+                                    .may_finish =       $3.may_finish       && $4.may_finish,
+                                    .is_empty =         $3.is_empty         && $4.is_empty,
+                                    .warned_dead_code = $3.warned_dead_code || $4.warned_dead_code,
+                                  });
       }
 
 ; /* inline_func */
@@ -8198,6 +8308,9 @@ context_decl:
 
 inline_comma_expr:
       /* Empty: nothing to do */
+      {
+          $$ = (struct statement_s){ .may_return = false, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = true, .warned_dead_code = false };
+      }
     | comma_expr
       {
           /* Add a F_RETURN to complete the statement */
@@ -8206,6 +8319,8 @@ inline_comma_expr:
           use_variable($1.name, VAR_USAGE_READ);
           check_unknown_type($1.type.t_type);
           free_fulltype($1.type);
+
+          $$ = (struct statement_s){ .may_return = true, .may_break = false, .may_continue = false, .may_finish = false, .is_empty = false, .warned_dead_code = false };
       }
 ; /* inline_comma_expr */
 
@@ -8215,6 +8330,9 @@ inline_comma_expr:
 inline_block:
       block
     | error
+      {
+          $$ = (struct statement_s){ .may_return = true, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = true, .warned_dead_code = true };
+      }
 ; /* inline_block */
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -8224,11 +8342,14 @@ inline_block:
 struct_decl:
       type_modifier_list L_STRUCT L_IDENTIFIER ';'
       {
+          check_identifier($3);
           (void)define_new_struct(MY_TRUE, $3, compiled_file, $1);
       }
     | type_modifier_list L_STRUCT L_IDENTIFIER
       {
           size_t i;
+
+          check_identifier($3);
 
           /* Free any struct members left over from a previous
            * struct parse. This should happen only in case
@@ -8257,6 +8378,8 @@ opt_base_struct:
           /* Look up the struct id for the given identifier */
 
           int num = -1;
+
+          check_identifier($2);
 
           if ($2->type == I_TYPE_UNKNOWN)
           {
@@ -8327,12 +8450,15 @@ member:
 member_name_list:
       basic_non_void_type L_IDENTIFIER
       {
+          check_identifier($2);
+
           add_struct_member($2->name, $1, NULL);
           $$ = $1;
       }
     | member_name_list ',' optional_stars L_IDENTIFIER
       {
           lpctype_t* type = get_array_type_with_depth($1, $3);
+          check_identifier($4);
           add_struct_member($4->name, type, NULL);
           free_lpctype(type);
           $$ = $1;
@@ -8813,6 +8939,7 @@ identifier:
       {
           /* Extract the string from the ident structure */
           $$ = ref_mstring($1->name);
+          check_identifier($1);
       }
 ;
 
@@ -8884,6 +9011,8 @@ new_arg_name:
       {
           funflag_t illegal_flags = $1.t_flags & (TYPE_MOD_STATIC|TYPE_MOD_NO_MASK|TYPE_MOD_PRIVATE|TYPE_MOD_PUBLIC|TYPE_MOD_VIRTUAL|TYPE_MOD_PROTECTED|TYPE_MOD_NOSAVE|TYPE_MOD_VISIBLE);
           ident_t *varident = NULL;
+
+          check_identifier($2);
 
           if (illegal_flags)
           {
@@ -8984,6 +9113,8 @@ name_list:
       type L_IDENTIFIER
       {
 %line
+          check_identifier($2);
+
           if ($1.t_type == NULL)
           {
               yyerror("Missing type");
@@ -8998,6 +9129,8 @@ name_list:
 
     | type L_IDENTIFIER
       {
+          check_identifier($2);
+
           if ($1.t_type == NULL)
           {
               yyerror("Missing type");
@@ -9022,6 +9155,7 @@ name_list:
           type.t_type = get_array_type_with_depth($1.t_type, $3);
           type.t_flags = $1.t_flags;
 
+          check_identifier($4);
           define_global_variable($4, type, MY_FALSE);
           free_fulltype(type);
           $$ = $1;
@@ -9035,6 +9169,7 @@ name_list:
           type.t_type = get_array_type_with_depth($1.t_type, $3);
           type.t_flags = $1.t_flags;
 
+          check_identifier($4);
           $<number>$ = define_global_variable($4, type, MY_TRUE); 
           free_fulltype(type);
       }
@@ -9061,7 +9196,12 @@ name_list:
 /* Blocks and simple statements.
  */
 
-block: '{' statements_block '}'
+block:
+    '{' statements_block '}'
+    {
+        $$ = $2;
+    }
+; /* block */
 
 
 statements_block:
@@ -9088,26 +9228,61 @@ statements_block:
           }
      
           leave_block_scope(MY_FALSE);
+
+          $$ = $2;
       }
 ; /* block_statements */
 
 
 statements:
       /* empty */
-    | statements local_name_list ';' { free_lpctype($2); }
+      {
+          $$ = (struct statement_s){ .may_return = false, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = true, .warned_dead_code = false };
+      }
+    | statements local_name_list ';'
+      {
+          free_lpctype($2);
+          $$ = $1;
+          $$.is_empty = false;
+
+          if (pragma_warn_dead_code && !$1.may_finish && !$$.warned_dead_code)
+          {
+              yywarnf("Unreachable code");
+              $$.warned_dead_code = true;
+          }
+      }
     | statements statement
+      {
+          $$ = (struct statement_s)
+               {
+                 .may_return       = $1.may_return       || $2.may_return,
+                 .may_break        = $1.may_break        || $2.may_break,
+                 .may_continue     = $1.may_continue     || $2.may_continue,
+                 .may_finish       = $1.may_finish       && $2.may_finish,
+                 .is_empty         = $1.is_empty         && $2.is_empty,
+                 .warned_dead_code = $1.warned_dead_code || $2.warned_dead_code,
+               };
+
+          if (pragma_warn_dead_code && !$1.may_finish && !$2.is_empty && !$$.warned_dead_code)
+          {
+              yywarnf("Unreachable code");
+              $$.warned_dead_code = true;
+          }
+      }
 ;
 
 
 local_name_list:
       basic_type L_IDENTIFIER
       {
+          check_identifier($2);
           define_local_variable($2, $1, NULL, $2->type == I_TYPE_LOCAL, MY_FALSE);
 
           $$ = $1;
       }
     | basic_type L_IDENTIFIER
       {
+          check_identifier($2);
           $2 = define_local_variable($2, $1, &$<lvalue>$, $2->type == I_TYPE_LOCAL, MY_TRUE);
       }
       L_ASSIGN expr0
@@ -9122,6 +9297,7 @@ local_name_list:
     | local_name_list ',' optional_stars L_IDENTIFIER
       {
           lpctype_t* type = get_array_type_with_depth($1, $3);
+          check_identifier($4);
           define_local_variable($4, type, NULL, $4->type == I_TYPE_LOCAL, MY_FALSE);
           free_lpctype(type);
 
@@ -9130,6 +9306,7 @@ local_name_list:
     | local_name_list ',' optional_stars  L_IDENTIFIER
       {
           lpctype_t* type = get_array_type_with_depth($1, $3);
+          check_identifier($4);
           $4 = define_local_variable($4, type, &$<lvalue>$, $4->type == I_TYPE_LOCAL, MY_TRUE);
           free_lpctype(type);
       }
@@ -9148,6 +9325,8 @@ local_name_list:
 statement:
       comma_expr ';'
       {
+          bytecode_t last = F_ILLEGAL;
+
           insert_pop_value();
 #ifdef F_BREAK_POINT
           if (d_flag)
@@ -9155,14 +9334,35 @@ statement:
 #endif /* F_BREAK_POINT */
 
           free_fulltype($1.type);
+
+          if (CURRENT_PROGRAM_SIZE > $1.start)
+              last = PROGRAM_BLOCK[CURRENT_PROGRAM_SIZE-1];
+
+          $$ = (struct statement_s)
+               {
+                    .may_return = (last == F_RAISE_ERROR || last == F_THROW),
+                    .may_break = false,
+                    .may_continue = false,
+                    .may_finish = (last != F_RAISE_ERROR && last != F_THROW),
+                    .is_empty = last == F_RAISE_ERROR,
+                    .warned_dead_code = false,
+               };
       }
 
     | error ';' /* Synchronisation point */
+      {
+          $$ = (struct statement_s){ .may_return = true, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = true, .warned_dead_code = true };
+      }
     | cond | while | do | for | foreach | switch
     | return ';'
+      {
+          $$ = $1;
+      }
     | block
     | /* empty */ ';'
-
+      {
+          $$ = (struct statement_s){ .may_return = false, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = true, .warned_dead_code = false };
+      }
     | L_BREAK ';'
       {
           /* Compile the break statement */
@@ -9187,6 +9387,7 @@ statement:
                   yyerrorf("Compiler limit: (L_BREAK) value too large: %"PRIdBcOffset
                           , current_break_address);
           }
+          $$ = (struct statement_s){ .may_return = false, .may_break = true, .may_continue = false, .may_finish = false, .is_empty = false, .warned_dead_code = false };
       }
 
     | L_CONTINUE ';'        /* This code is a jump */
@@ -9234,6 +9435,8 @@ statement:
           current_continue_address =
                         ( current_continue_address & SWITCH_DEPTH_MASK ) |
                         ( CURRENT_PROGRAM_SIZE - sizeof(int32) );
+
+          $$ = (struct statement_s){ .may_return = false, .may_break = false, .may_continue = true, .may_finish = false, .is_empty = false, .warned_dead_code = false };
       }
 ; /* statement */
 
@@ -9245,6 +9448,8 @@ return:
               lpctype_error("Must return a value for a function declared",
                          exact_types);
           ins_f_code(F_RETURN0);
+
+          $$ = (struct statement_s){ .may_return = true, .may_break = false, .may_continue = false, .may_finish = false, .is_empty = false, .warned_dead_code = false };
       }
 
     | L_RETURN comma_expr
@@ -9284,6 +9489,8 @@ return:
               ins_f_code(F_RETURN);
 
           free_fulltype($2.type);
+
+          $$ = (struct statement_s){ .may_return = true, .may_break = false, .may_continue = false, .may_finish = false, .is_empty = false, .warned_dead_code = false };
       }
 ; /* return */
 
@@ -9435,6 +9642,8 @@ while:
           current_break_address    = $<numbers>1[1];
 
           free_fulltype($4.type);
+
+          $$ = (struct statement_s){ .may_return = $7.may_return, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = false, .warned_dead_code = false };
       }
 ; /* while */
 
@@ -9560,6 +9769,16 @@ do:
           current_break_address    = $<numbers>1[1];
 
           free_fulltype($7.type);
+
+          $$ = (struct statement_s)
+               {
+                    .may_return = $3.may_return,
+                    .may_break = false,
+                    .may_continue = false,
+                    .may_finish = $3.may_break || $3.may_continue || $3.may_finish,
+                    .is_empty = false,
+                    .warned_dead_code = $3.warned_dead_code,
+                };
       }
 ; /* do */
 
@@ -9778,6 +9997,8 @@ for:
 
           /* and leave the for scope */
           leave_block_scope(MY_FALSE);
+
+          $$ = (struct statement_s){ .may_return = $13.may_return, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = false, .warned_dead_code = false };
       }
 ; /* for */
 
@@ -10122,6 +10343,8 @@ foreach:
           leave_block_scope(MY_FALSE);
 
           free_lpctype($7.expr_type);
+
+          $$ = (struct statement_s){ .may_return = $10.may_return, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = false, .warned_dead_code = false };
       }
 ; /* foreach */
 
@@ -10199,21 +10422,8 @@ foreach_var_lvalue:  /* Gather the code for one lvalue */
 ; /* foreach_var_lvalue */
 
 foreach_in:
-    /* The purpose of this rule is to avoid making "in" a reserved
-     * word. Instead we require an identifier/local with the
-     * name "in" as alternative to ":". Main reason to allow "in"
-     * is MudOS compatibility.
-     * TODO: Make MudOS-compats switchable.
-     */
-
-      identifier
-
-      {
-          if (!mstreq($1, STR_IN))
-              yyerror("Expected keyword 'in' in foreach()");
-          free_mstring($1);
-      }
-
+    /* TODO: Make MudOS-compats switchable. */
+      keyword_in
     | ':'
 ; /* foreach_in */
 
@@ -10294,6 +10504,17 @@ foreach_expr:
           free_lvalue_block($1.lvalue);
       }
 ; /* foreach_expr */
+
+keyword_in:
+      /* The purpose of this rule is to avoid making "in" a reserved word.
+       * Instead we require an identifier/local with the name "in".
+       */
+      L_IDENTIFIER
+      {
+          if (!mstreq($1->name, STR_IN))
+              yyerror("Expected keyword 'in'");
+      }
+; /* keyword_in */
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
 /* The switch statement.
@@ -10411,20 +10632,49 @@ switch:
         current_break_stack_need--;
 
         free_fulltype($3.type);
+
+        $$ = (struct statement_s){ .may_return = $7.statements.may_return,
+                                   .may_break = false,
+                                   .may_continue = $7.statements.may_continue,
+                                   .may_finish = !$7.has_default || $7.statements.may_break || $7.statements.may_finish,
+                                   .is_empty = false,
+                                   .warned_dead_code = $7.statements.warned_dead_code,
+                                 };
       }
 ; /* switch */
 
 
 switch_block:
       switch_block switch_statements
+      {
+        $$.has_default = $1.has_default || $2.has_default;
+        $$.statements = (struct statement_s)
+                        {
+                            .may_return =       $1.statements.may_return       || $2.statements.may_return,
+                            .may_break =        $1.statements.may_break        || $2.statements.may_break,
+                            .may_continue =     $1.statements.may_continue     || $2.statements.may_continue,
+                            .may_finish =                                         $2.statements.may_finish,
+                            .is_empty =         false,
+                            .warned_dead_code = $1.statements.warned_dead_code || $2.statements.warned_dead_code,
+                        };
+      }
     | switch_statements
 ; /* switch_block */
 
 
-switch_statements: switch_label statements_block ;
+switch_statements:
+    switch_label statements_block
+    {
+        $$.has_default = $1 != 0;
+        $$.statements = $2;
+    }
+; /* switch_statements */
 
 
-switch_label: case | default ;
+switch_label:
+      case    { $$ = 0; }
+    | default { $$ = 1; }
+; /* switch_label */
 
 
 case: L_CASE case_label ':'
@@ -10627,7 +10877,7 @@ cond:
           p_int destination, location, offset;
 
           /* Complete the branch over the if-part */
-          destination = (p_int)$3;
+          destination = (p_int)$3.address;
           location = $1[1];
           if ( (offset = destination - location) > 0x100)
           {
@@ -10649,6 +10899,16 @@ cond:
            * changing the actual break-address.
            */
           current_break_address |= $1[0] & CASE_LABELS_ENABLED;
+
+          $$ = (struct statement_s)
+               {
+                    .may_return =       $2.may_return       || $3.statements.may_return,
+                    .may_break =        $2.may_break        || $3.statements.may_break,
+                    .may_continue =     $2.may_continue     || $3.statements.may_continue,
+                    .may_finish =       $2.may_finish       || $3.statements.may_finish,
+                    .is_empty =         false,
+                    .warned_dead_code = $2.warned_dead_code || $3.statements.warned_dead_code,
+               };
       }
 ; /* cond */
 
@@ -10657,7 +10917,8 @@ optional_else:
       /* empty */ %prec LOWER_THAN_ELSE
       {
           /* The if-part ends here */
-          $$ = CURRENT_PROGRAM_SIZE;
+          $$.address = CURRENT_PROGRAM_SIZE;
+          $$.statements = (struct statement_s){ .may_return = false, .may_break = false, .may_continue = false, .may_finish = true, .is_empty = true, .warned_dead_code = false };
       }
 
     | L_ELSE
@@ -10672,8 +10933,9 @@ optional_else:
           /* Fix up the branch over the else part and return
            * the start address of the else part.
            */
-          $$ = fix_branch( F_LBRANCH, CURRENT_PROGRAM_SIZE, $<address>2);
-          $$ += $<address>2 + 1;
+          $$.address = fix_branch( F_LBRANCH, CURRENT_PROGRAM_SIZE, $<address>2);
+          $$.address += $<address>2 + 1;
+          $$.statements = $3;
       }
 ; /* optional_else */
 
@@ -11382,13 +11644,33 @@ expr0:
       }
 
     /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
-    | expr0 '>'  expr0
+    | expr0 keyword_in expr0 %prec L_EQ
       {
-          check_unknown_type($1.type.t_type);
-          check_unknown_type($3.type.t_type);
+          lpctype_t *result = check_binary_op_types($1.type.t_type, $3.type.t_type, "in", types_in, lpctype_int, NULL, false);
 
           $$ = $1;
-          $$.type = get_fulltype(lpctype_int);
+          $$.type = get_fulltype(result);
+          $$.name = NULL;
+          $$.lvalue = (lvalue_block_t) {0, 0};
+
+          use_variable($1.name, VAR_USAGE_READ);
+          use_variable($3.name, VAR_USAGE_READ);
+
+          free_fulltype($1.type);
+          free_fulltype($3.type);
+          free_lvalue_block($3.lvalue);
+          free_lvalue_block($1.lvalue);
+
+          ins_f_code(F_IN);
+      }
+
+    /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+    | expr0 '>'  expr0
+      {
+          lpctype_t *result = check_binary_op_types($1.type.t_type, $3.type.t_type, ">", types_comparison, lpctype_int, NULL, false);
+
+          $$ = $1;
+          $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
 
@@ -11404,11 +11686,10 @@ expr0:
       }
     | expr0 L_GE  expr0
       {
-          check_unknown_type($1.type.t_type);
-          check_unknown_type($3.type.t_type);
+          lpctype_t *result = check_binary_op_types($1.type.t_type, $3.type.t_type, ">=", types_comparison, lpctype_int, NULL, false);
 
           $$ = $1;
-          $$.type = get_fulltype(lpctype_int);
+          $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
 
@@ -11424,11 +11705,10 @@ expr0:
       }
     | expr0 '<'  expr0
       {
-          check_unknown_type($1.type.t_type);
-          check_unknown_type($3.type.t_type);
+          lpctype_t *result = check_binary_op_types($1.type.t_type, $3.type.t_type, "<", types_comparison, lpctype_int, NULL, false);
 
           $$ = $1;
-          $$.type = get_fulltype(lpctype_int);
+          $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
 
@@ -11444,11 +11724,10 @@ expr0:
       }
     | expr0 L_LE  expr0
       {
-          check_unknown_type($1.type.t_type);
-          check_unknown_type($3.type.t_type);
+          lpctype_t *result = check_binary_op_types($1.type.t_type, $3.type.t_type, "<=", types_comparison, lpctype_int, NULL, false);
 
           $$ = $1;
-          $$.type = get_fulltype(lpctype_int);
+          $$.type = get_fulltype(result);
           $$.name = NULL;
           $$.lvalue = (lvalue_block_t) {0, 0};
 
@@ -12529,6 +12808,7 @@ expr4:
           bytecode_p p;
           ident_t *varident;
 %line
+          check_identifier($1);
           varident = get_initialized_variable($1);
           if (!varident)
               /* variable not declared */
@@ -12817,6 +13097,7 @@ name_lvalue:
           /* Generate the lvalue for a local or global variable */
           ident_t *varident;
 %line
+          check_identifier($1);
           varident = get_initialized_variable($1);
           if (!varident)
               /* variable not declared */
@@ -13144,6 +13425,7 @@ name_var_lvalue:
 local_name_lvalue:
       basic_type L_IDENTIFIER
       {
+          check_identifier($2);
           $2 = define_local_variable($2, $1, &$$, $2->type == I_TYPE_LOCAL, MY_TRUE);
 
           ref_lpctype($$.type);
@@ -14263,7 +14545,8 @@ function_call:
                   ap_needed = MY_TRUE;
               }
 %endif
-              else if ( (f = lookup_predef($1.real)) != -1 )
+              else if ( (f = lookup_predef($1.real)) != -1
+                     && instrs[f].arg_index >= 0)
               {
                   /* EFUN */
 
@@ -14814,6 +15097,7 @@ function_name:
       {
           ident_t *fun = $1;
 
+          check_identifier($1);
           if (fun->type == I_TYPE_LOCAL)
           {
               fun = find_shared_identifier_mstr(fun->name, I_TYPE_UNKNOWN, 0);
@@ -14838,6 +15122,7 @@ function_name:
 
     | L_COLON_COLON L_IDENTIFIER
       {
+          check_identifier($2);
           *($$.super = yalloc(1)) = '\0';
           $$.real  = $2;
       }
@@ -14847,6 +15132,7 @@ function_name:
 %line
           ident_t *fun = $3;
 
+          check_identifier($3);
           if (fun->type == I_TYPE_LOCAL)
           {
               fun = find_shared_identifier_mstr(fun->name, I_TYPE_UNKNOWN, 0);
@@ -14923,6 +15209,7 @@ function_name:
 anchestor:
       L_IDENTIFIER
       {
+          check_identifier($1);
           $$ = ystring_copy(get_txt($1->name));
       }
 
@@ -16594,7 +16881,14 @@ update_duplicate_functions (program_t* from, int first_function_index, inherit_t
             /* No destination but visible, make it undefined. */
             if (!(oldfunp[oldix].flags & NAME_HIDDEN)
              && is_old_inherited_function(from, first_function_index, dupinheritp, oldix, update_existing))
+            {
                 oldfunp[oldix].flags = NAME_UNDEFINED|NAME_HIDDEN|TYPE_MOD_PRIVATE;
+                /* The function will then be part of our program (as undefined),
+                 * so we need a reference to its name.
+                 */
+                if (oldfunp[oldix].name)
+                    ref_mstring(oldfunp[oldix].name);
+            }
 
             continue;
         }
@@ -16961,7 +17255,14 @@ update_virtual_program (program_t *from, inherit_t *oldinheritp, inherit_t *newi
                 continue;
 
             if (is_old_inherited_function(from, first_function_index, oldinheritp, *oldix, update_existing))
+            {
                 oldfunp[*oldix].flags = NAME_UNDEFINED|NAME_HIDDEN|TYPE_MOD_PRIVATE;
+                /* The function will now be part of our program (as undefined),
+                 * so we need a reference to its name.
+                 */
+                if (oldfunp[*oldix].name)
+                    ref_mstring(oldfunp[*oldix].name);
+            }
         }
 
         /* Now we have to take care of the remaining functions with names
@@ -17741,16 +18042,25 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
 
                         if ( !(OldFunction->flags & NAME_INHERITED) )
                         {
-                            /* Since inherits are not possible after
-                             * functions have been compiled, the only
-                             * way to get here is when we had a prototype
-                             * for the function.
-                             * It's not fatal, but annoying.
+                            /* Since inherits are not possible after functions
+                             * have been compiled, there are two options:
+                             * 1. We had a prototype for the function.
+                             * 2. Virtual inherit update made an inherited
+                             *    function undefined.
+                             * In both cases we'll cross-define to the new
+                             * function.
                              */
-                            yywarnf(
-                                "Misplaced prototype for %s in %s ignored.\n"
-                                , get_txt(fun.name), current_loc.file->name
-                            );
+                            if (OldFunction->flags & NAME_PROTOTYPE)
+                                yywarnf(
+                                    "Misplaced prototype for %s in %s ignored.\n"
+                                    , get_txt(fun.name), current_loc.file->name
+                                );
+
+                            /* The function name was a counted reference,
+                             * but after cross-definition it shouldn't be.
+                             */
+                            free_mstring(OldFunction->name);
+
                             cross_define( &fun, OldFunction
                                         , current_func_index - n );
                             p->u.global.function = current_func_index;
@@ -18410,6 +18720,7 @@ printf("DEBUG: prolog: type ptrs: %p, %p\n", local_variables, context_variables 
     function_call_info[0].unlimited_args = false;
     function_call_info[0].remaining_arg_types = 0;
     arg_types_exhausted = false;
+    warned_deprecated_in = false;
 
     max_number_of_init_locals = 0;
 
