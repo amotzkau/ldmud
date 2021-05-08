@@ -219,6 +219,7 @@
 #include "heartbeat.h"
 #include "instrs.h"
 #include "lex.h"
+#include "lwobject.h"
 #include "mapping.h"
 #include "mstrings.h"
 #include "object.h"
@@ -236,6 +237,7 @@
 #include "wiz_list.h"
 #include "xalloc.h"
 
+#include "i-current_object.h"
 #include "i-eval_cost.h"
 #include "i-svalue_cmp.h"
 
@@ -272,38 +274,6 @@ struct catch_context
     svalue_t catch_value;
       /* Holds the value throw()n from within a catch() while the throw
        * is executed.
-       */
-};
-
-/* --- struct cache: one entry of the apply cache
- *
- * Every entry in the apply cache holds information about a function
- * call, both for functions found and not found.
- */
-
-struct cache
-{
-    string_t *name;
-      /* The name of the cached function, shared for existing functions,
-       * allocated if the object does not have the function.
-       * This pointer counts as reference.
-       */
-    program_t *progp;
-      /* The pointer to the program code of the function, or NULL if the
-       * object does not implement the function.
-       */
-    int32 id;
-      /* The id_number of the program. */
-
-    funflag_t flags;
-      /* Copy of the _MOD_STATIC and _MOD_PROTECTED flags of the function.
-       */
-    bytecode_p funstart;
-      /* Pointer to the function.
-       */
-    int function_index_offset;
-    int variable_index_offset;
-      /* Function and variable index offset.
        */
 };
 
@@ -380,7 +350,7 @@ static ptrdiff_t        stack_size[TOTAL_TRACE_LENGTH];
 static ptrdiff_t        abs_stack_size[TOTAL_TRACE_LENGTH];
 static bytecode_p       previous_pc[TOTAL_TRACE_LENGTH];
 static program_t * previous_programs[TOTAL_TRACE_LENGTH];
-static object_t  * previous_objects[TOTAL_TRACE_LENGTH];
+static svalue_t    previous_objects[TOTAL_TRACE_LENGTH];
   /* These arrays, organized as ring buffers, hold the vitals of the
    * last TOTAL_TRACE_LENGTH instructions executed. Yet unused entries
    * are 0 resp. NULL.
@@ -464,11 +434,11 @@ static const char * svalue_typename[]
    , /* T_QUOTED_ARRAY */   "quoted-array"
    , /* T_STRUCT */         "struct"
    , /* T_BYTES  */         "bytes"
+   , /* T_LWOBJECT */       "lwobject"
    , /* T_CALLBACK */       "callback"
    , /* T_ERROR_HANDLER */  "error-handler"
    , /* T_BREAK_ADDR */     "break-address"
    , /* T_NULL */           "null"
-   , /* T_BYTES */          "bytes"
    };
 
 /*-------------------------------------------------------------------------*/
@@ -649,7 +619,7 @@ statcounter_t apply_cache_miss = 0;
    */
 #endif
 
-static struct cache cache[CACHE_SIZE];
+static call_cache_t cache[CACHE_SIZE];
   /* The apply cache.
    */
 
@@ -790,6 +760,7 @@ int num_protected_lvalues = 0;
 /* Forward declarations */
 
 enum { APPLY_NOT_FOUND = 0, APPLY_FOUND, APPLY_DEFAULT_FOUND };
+static bool apply_lwob(string_t *fun, lwobject_t *lwob, int num_arg, bool b_ign_prot, call_cache_t *cache_entry);
 static int int_apply(string_t *, object_t *, int, Bool, Bool);
 enum call_other_error_handling
 {
@@ -821,30 +792,37 @@ static INLINE void
 assign_eval_cost_inl(void)
 {
     unsigned long carry;
-    if (current_object->user)
+    object_t *ob;
+    wiz_list_t *user = get_current_user();
+    if (user)
     {
-        current_object->user->cost += eval_cost - assigned_eval_cost;
-        carry = current_object->user->cost / 1000000000;
+        user->cost += eval_cost - assigned_eval_cost;
+        carry = user->cost / 1000000000;
         if (carry)
         {
-            current_object->user->gigacost += carry;
-            current_object->user->cost %= 1000000000;
+            user->gigacost += carry;
+            user->cost %= 1000000000;
         }
-        current_object->user->total_cost += eval_cost - assigned_eval_cost;
-        carry = current_object->user->total_cost / 1000000000;
+        user->total_cost += eval_cost - assigned_eval_cost;
+        carry = user->total_cost / 1000000000;
         if (carry)
         {
-            current_object->user->total_gigacost += carry;
-            current_object->user->total_cost %= 1000000000;
+            user->total_gigacost += carry;
+            user->total_cost %= 1000000000;
         }
     }
-    current_object->ticks += eval_cost - assigned_eval_cost;
+
+    ob = get_current_object();
+    if (ob)
     {
-        carry = current_object->ticks / 1000000000;
-        if (carry)
+        ob->ticks += eval_cost - assigned_eval_cost;
         {
-            current_object->gigaticks += carry;
-            current_object->ticks %= 1000000000;
+            carry = ob->ticks / 1000000000;
+            if (carry)
+            {
+                ob->gigaticks += carry;
+                ob->ticks %= 1000000000;
+            }
         }
     }
     assigned_eval_cost = eval_cost;
@@ -998,7 +976,7 @@ init_interpret (void)
  */
 
 {
-    struct cache invalid_entry;
+    call_cache_t invalid_entry;
     int i;
 
     /* The cache is inited to hold entries for 'functions' in a non-existing
@@ -1256,6 +1234,10 @@ int_free_svalue (svalue_t *v)
         break;
       }
 
+    case T_LWOBJECT:
+        free_lwobject(v->u.lwob);
+        break;
+
     case T_QUOTED_ARRAY:
     case T_POINTER:
         free_array(v->u.vec);
@@ -1425,6 +1407,10 @@ free_svalue (svalue_t *v)
         needs_deserializing = (v->u.vec->ref == 1);
         break;
 
+    case T_LWOBJECT:
+        needs_deserializing = (v->u.lwob->ref == 1);
+        break;
+
     case T_STRUCT:
         needs_deserializing = (struct_ref(v->u.strct) == 1);
         break;
@@ -1532,8 +1518,16 @@ _destructed_object_ref (svalue_t *svp)
     if (svp->type != T_OBJECT && svp->type != T_CLOSURE)
         return MY_FALSE;
 
-    if (svp->type == T_OBJECT || !CLOSURE_MALLOCED(type = svp->x.closure_type))
+    if (svp->type == T_OBJECT)
         return (svp->u.ob->flags & O_DESTRUCTED) ? MY_TRUE : MY_FALSE;
+
+    if (!CLOSURE_MALLOCED(type = svp->x.closure_type))
+    {
+        if (type < CLOSURE_LWO)
+            return MY_FALSE;
+        else
+            return (svp->u.ob->flags & O_DESTRUCTED) ? MY_TRUE : MY_FALSE;
+    }
 
     /* Lambda closure */
 
@@ -1543,10 +1537,15 @@ _destructed_object_ref (svalue_t *svp)
         return MY_FALSE;
 
     if (type == CLOSURE_LFUN
-     && (l->function.lfun.ob->flags & O_DESTRUCTED))
+     && l->function.lfun.ob.type == T_OBJECT
+     && (l->function.lfun.ob.u.ob->flags & O_DESTRUCTED))
         return MY_TRUE;
 
-    return (l->ob->flags & O_DESTRUCTED) ? MY_TRUE : MY_FALSE;
+    if (l->ob.type == T_OBJECT
+     && (l->ob.u.ob->flags & O_DESTRUCTED))
+        return MY_TRUE;
+
+    return MY_FALSE;
 
 } /* _destructed_object_ref() */
 
@@ -1569,8 +1568,16 @@ inl_object_ref (svalue_t *svp, object_t *obj)
     if (svp->type != T_OBJECT && svp->type != T_CLOSURE)
         return MY_FALSE;
 
-    if (svp->type == T_OBJECT || !CLOSURE_MALLOCED(type = svp->x.closure_type))
+    if (svp->type == T_OBJECT)
         return svp->u.ob == obj;
+
+    if (!CLOSURE_MALLOCED(type = svp->x.closure_type))
+    {
+        if (type < CLOSURE_LWO)
+            return MY_FALSE;
+        else
+            return svp->u.ob == obj;
+    }
 
     /* Lambda closure */
 
@@ -1579,10 +1586,16 @@ inl_object_ref (svalue_t *svp, object_t *obj)
     if (CLOSURE_HAS_CODE(type) && type == CLOSURE_UNBOUND_LAMBDA)
         return MY_FALSE;
 
-    if (type == CLOSURE_LFUN && l->function.lfun.ob == obj)
+    if (type == CLOSURE_LFUN
+     && l->function.lfun.ob.type == T_OBJECT
+     && l->function.lfun.ob.u.ob == obj)
         return MY_TRUE;
 
-    return l->ob == obj;
+    if (l->ob.type == T_OBJECT
+     && l->ob.u.ob == obj)
+        return MY_TRUE;
+
+    return MY_FALSE;
 
 } /* inl_object_ref() */
 // exporting the function als object_ref() is currently not necessary, because
@@ -1631,6 +1644,10 @@ internal_assign_svalue_no_free (svalue_t *to, svalue_t *from)
 
           break;
         }
+        break;
+
+    case T_LWOBJECT:
+        ref_lwobject(to->u.lwob);
         break;
 
     case T_QUOTED_ARRAY:
@@ -3768,7 +3785,7 @@ inter_add_array (vector_t *q, vector_t **vpp)
             r->size = p_size + q_size;
 
             r->user->size_array -= p_size;
-            r->user = current_object->user;
+            r->user = get_current_user();
             r->user->size_array += p_size + q_size;
         } else
         /* Just allocate a new vector and memcopy p into it. */
@@ -6118,7 +6135,7 @@ find_virtual_value (int num)
  */
 
 {
-    return &current_object->variables[translate_virtual_variable_index(num)];
+    return get_current_object_variables() + translate_virtual_variable_index(num);
 } /* find_virtual_value() */
 
 /*-------------------------------------------------------------------------*/
@@ -6139,7 +6156,7 @@ translate_virtual_variable_index (int num)
 
 {
     inherit_t *inheritp;
-    program_t *progp;
+    program_t *progp, *obprogp;
 
     /* Make sure that we are not calling from a set_this_object()
      * context.
@@ -6172,16 +6189,17 @@ translate_virtual_variable_index (int num)
      * but not INHERIT_TYPE_NORMAL.
      */
     progp = inheritp->prog;
+    obprogp = get_current_object_program();
 
-    for (inheritp = current_object->prog->inherit
+    for (inheritp = obprogp->inherit
        ; inheritp->prog != progp || inheritp->inherit_type == INHERIT_TYPE_NORMAL
        ; inheritp++) NOOP;
 
     /* Handle obsoleted inherited programs */
-    while (inheritp->inherit_type & INHERIT_TYPE_MAPPED)
+    while (inheritp->inherit_mapped)
     {
-        inherit_t *new_inheritp = current_object->prog->inherit + inheritp->updated_inherit;
-        num = current_object->prog->update_index_map[num + inheritp->variable_map_offset];
+        inherit_t *new_inheritp = obprogp->inherit + inheritp->updated_inherit;
+        num = obprogp->update_index_map[num + inheritp->variable_map_offset];
 
         if (num >= new_inheritp->prog->num_variables - new_inheritp->prog->num_virtual_variables)
         {
@@ -6198,19 +6216,23 @@ translate_virtual_variable_index (int num)
     num = num + inheritp->variable_index_offset;
 
 #ifdef DEBUG
-    if (!current_object->variables
-     || num >= current_object->prog->num_variables
+    if (!get_current_object_variables()
+     || num >= obprogp->num_variables
        )
     {
         if (num)
             fatal("%s Fatal: translate_virtual_variable_index() on object %p '%s' "
                   "w/o variables, num %d\n"
-                 , time_stamp(), current_object, get_txt(current_object->name)
+                 , time_stamp()
+                 , current_object.type == T_OBJECT ? (void*)current_object.u.ob : (void*)current_object.u.lwob
+                 , get_txt(current_object.type == T_OBJECT ? current_object.u.ob->name : obprogp->name)
                  , num);
         else
             errorf("%s Error: translate_virtual_variable_index() on object %p '%s' "
                   "w/o variables, num %d\n"
-                 , time_stamp(), current_object, get_txt(current_object->name)
+                 , time_stamp()
+                 , current_object.type == T_OBJECT ? (void*)current_object.u.ob : (void*)current_object.u.lwob
+                 , get_txt(current_object.type == T_OBJECT ? current_object.u.ob->name : obprogp->name)
                  , num);
     }
 #endif
@@ -6833,7 +6855,11 @@ check_rtt_compatibility_inl(lpctype_t *formaltype, svalue_t *svp, lpctype_t **sv
             break;
 
         case T_OBJECT:
-            valuetype = lpctype_object;
+            valuetype = lpctype_any_object;
+            break;
+
+        case T_LWOBJECT:
+            valuetype = lpctype_any_lwobject;
             break;
 
         case T_STRUCT:
@@ -6843,10 +6869,44 @@ check_rtt_compatibility_inl(lpctype_t *formaltype, svalue_t *svp, lpctype_t **sv
 
     if (valuetype)
     {
-        Bool result = lpctype_contains(valuetype, formaltype);
+        Bool result;
 
-        if (svptype)
-            *svptype = ref_lpctype(valuetype);
+        if (bsvp->type == T_OBJECT)
+        {
+            result = is_compatible_object(bsvp->u.ob, formaltype);
+
+            if (svptype)
+            {
+                if (result)
+                    *svptype = ref_lpctype(valuetype);
+                else
+                    *svptype = get_object_type(bsvp->u.ob->prog->name);
+
+                if (*svptype == NULL)
+                    *svptype = lpctype_any_object;
+            }
+        }
+        else if (bsvp->type == T_LWOBJECT)
+        {
+            result = is_compatible_lwobject(bsvp->u.lwob, formaltype);
+
+            if (svptype)
+            {
+                if (result)
+                    *svptype = ref_lpctype(valuetype);
+                else
+                    *svptype = get_lwobject_type(bsvp->u.lwob->prog->name);
+
+                if (*svptype == NULL)
+                    *svptype = lpctype_any_lwobject;
+            }
+        }
+        else
+        {
+            result = lpctype_contains(valuetype, formaltype);
+            if (svptype)
+                *svptype = ref_lpctype(valuetype);
+        }
 
         clean_struct_type(valuetype);
         free_lpctype(valuetype);
@@ -7102,12 +7162,12 @@ privilege_violation2 ( string_t *what, svalue_t *arg, svalue_t *arg2
     int num_arg = 3;
 
     /* Trusted objects */
-    if (current_object == master_ob) return MY_TRUE;
-    if (current_object == simul_efun_object) return MY_TRUE;
+    if (get_current_object() == master_ob) return MY_TRUE;
+    if (get_current_object() == simul_efun_object) return MY_TRUE;
 
     /* Setup and call the lfun */
     push_ref_string(sp, what);
-    push_ref_valid_object(sp, current_object, "privilege violation");
+    push_current_object(sp, "privilege_violation");
     sp++;
     assign_svalue_no_free(sp, arg);
     if (arg2 != NULL)
@@ -7133,7 +7193,7 @@ privilege_violation2 ( string_t *what, svalue_t *arg, svalue_t *arg2
 
 /*-------------------------------------------------------------------------*/
 Bool
-privilege_violation4 ( string_t *what,    object_t *whom
+privilege_violation4 ( string_t *what,    svalue_t whom
                      , string_t *how_str, int how_num
                      , svalue_t *sp)
 
@@ -7170,14 +7230,14 @@ privilege_violation4 ( string_t *what,    object_t *whom
     svalue_t *svp;
 
     /* Trust these objects */
-    if (current_object == master_ob) return MY_TRUE;
-    if (current_object == simul_efun_object) return MY_TRUE;
+    if (get_current_object() == master_ob) return MY_TRUE;
+    if (get_current_object() == simul_efun_object) return MY_TRUE;
 
     /* Set up the lfun call */
 
     push_ref_string(sp, what);
-    push_ref_valid_object(sp, current_object, "privilege_violation");
-    if (!whom)
+    push_current_object(sp, "privilege_violation");
+    if (whom.type == T_NUMBER)
     {
         if (how_str)
             push_ref_string(sp, how_str);
@@ -7187,7 +7247,7 @@ privilege_violation4 ( string_t *what,    object_t *whom
     }
     else
     {
-        push_ref_object(sp, whom, "privilege_violation");
+        assign_object_svalue_no_free(++sp, whom, "privilege_violation");
         if (how_str)
             push_ref_string(sp, how_str);
         else
@@ -7210,7 +7270,7 @@ privilege_violation4 ( string_t *what,    object_t *whom
 
 /*-------------------------------------------------------------------------*/
 Bool
-privilege_violation_n ( string_t *what, object_t *whom, svalue_t *sp, int num_arg)
+privilege_violation_n ( string_t *what, svalue_t whom, svalue_t *sp, int num_arg)
 
 /* Call the mudlib to check for a privilege violation:
  *
@@ -7242,23 +7302,16 @@ privilege_violation_n ( string_t *what, object_t *whom, svalue_t *sp, int num_ar
     int num;
 
     /* Trust these objects */
-    if (current_object == master_ob) return MY_TRUE;
-    if (current_object == simul_efun_object) return MY_TRUE;
+    if (get_current_object() == master_ob) return MY_TRUE;
+    if (get_current_object() == simul_efun_object) return MY_TRUE;
 
     /* Set up the lfun call */
 
     arg = sp + 1 - num_arg;
 
     push_ref_string(sp, what);
-    push_ref_valid_object(sp, current_object, "privilege_violation");
-    if (!whom)
-    {
-        push_number(sp, 0);
-    }
-    else
-    {
-        push_ref_object(sp, whom, "privilege_violation");
-    }
+    push_current_object(sp, "privilege_violation");
+    assign_object_svalue_no_free(++sp, whom, "privilege_violation");
 
     for (num = num_arg; num--; arg++)
     {
@@ -7298,8 +7351,8 @@ trace_test (int b)
         && O_SET_INTERACTIVE(ip, current_interactive)
         && (ip->trace_level & b)
         && (ip->trace_prefix == NULL
-            || (current_object
-                && mstrprefixed(ip->trace_prefix, current_object->name)))
+            || (get_current_object()
+                && mstrprefixed(ip->trace_prefix, get_current_object()->name)))
     ;
 } /* trace_test() */
 
@@ -7320,13 +7373,13 @@ do_trace (char *msg, char *fname, char *post)
 {
     char buf[10000];
     char *objname;
+    object_t *ob;
 
     if (!TRACEHB())
         return;
+    ob = get_current_object();
     objname = TRACETST(TRACE_OBJNAME)
-              ? (current_object && current_object->name
-                   ? get_txt(current_object->name)
-                   : "?")
+              ? ((ob && ob->name) ? get_txt(ob->name) : "?")
               : "";
     sprintf(buf, "*** %d %*s %s %s %s%s", tracedepth, tracedepth, ""
                , msg, objname, fname, post);
@@ -7595,6 +7648,9 @@ push_control_stack ( svalue_t   *sp
 #ifdef EVAL_COST_TRACE
     csp->eval_cost = eval_cost;
 #endif
+    csp->ob = const0;
+    csp->prev_ob = const0;
+    csp->pretend_to_be = const0;
 } /* push_control_stack() */
 
 /*-------------------------------------------------------------------------*/
@@ -7618,6 +7674,7 @@ pop_control_stack (void)
     }
     if (current_lambda.type == T_CLOSURE)
         free_closure(&current_lambda);
+    free_svalue(&csp->pretend_to_be);
     current_lambda = csp->lambda;
     inter_pc = csp->pc;
     inter_fp = csp->fp;
@@ -7633,7 +7690,7 @@ pop_control_stack (void)
 inherit_t *
 adjust_variable_offsets ( const inherit_t * inheritp
                         , const program_t * prog
-                        , const object_t  * obj
+                        , const program_t * obprog
                         )
 
 /* If we do an explicit call into a virtually inherited base class we
@@ -7642,8 +7699,8 @@ adjust_variable_offsets ( const inherit_t * inheritp
  * _object_ (i.e. the runtime environment) in which the program
  * is running.
  *
- * <inheritp> is the intended target for the call, <prog> is the
- * currently running program, <obj> is the currently used object.
+ * <inheritp> is the intended target for the call, <prog> is the currently
+ * running program, <obprog> is the program of the currently used object.
  * The result is either NULL if no adjustment is required (then the caller
  * has to use the original <inheritp> passed in), or the pointer to the
  * inheritance structure to be used.
@@ -7655,7 +7712,7 @@ adjust_variable_offsets ( const inherit_t * inheritp
 {
     inherit_t * inh = NULL;
 
-    if (prog != obj->prog
+    if (prog != obprog
      && inheritp->inherit_type != INHERIT_TYPE_NORMAL
        )
     {
@@ -7664,8 +7721,8 @@ adjust_variable_offsets ( const inherit_t * inheritp
          * Don't get confused by normal inherits, though.
          */
 
-        int i = obj->prog->num_inherited;
-        inh = obj->prog->inherit;
+        int i = obprog->num_inherited;
+        inh = obprog->inherit;
 
         while (i)
         {
@@ -7694,7 +7751,7 @@ adjust_variable_offsets ( const inherit_t * inheritp
                    , ts, ts
                    , get_txt(prog->name)
                    , get_txt(inheritp->prog->name)
-                   , get_txt(obj->prog->name)
+                   , get_txt(obprog->name)
                    , ts);
             inh = NULL;
         }
@@ -7733,23 +7790,24 @@ setup_inherited_call (unsigned short inhIndex, unsigned short *fx)
      * is running.
      */
     {
+        program_t *obprog = get_current_object_program();
         inherit_t * inh;
 
-        inh = adjust_variable_offsets(inheritp, current_prog, current_object);
+        inh = adjust_variable_offsets(inheritp, current_prog, obprog);
         if (inh)
         {
             /* Found a virtual base class, so un-adjust the offsets. */
             inheritp = inh;
-            current_variables = current_object->variables;
+            current_variables = get_current_object_variables();
             variable_index_offset = 0;
             function_index_offset = 0;
 
             /* Check for obsoleted inherited programs. */
-            while (inheritp->inherit_type & INHERIT_TYPE_MAPPED)
+            while (inheritp->inherit_mapped)
             {
                 unsigned short prevfx = *fx;
 
-                *fx = current_object->prog->update_index_map[prevfx + inheritp->function_map_offset];
+                *fx = obprog->update_index_map[prevfx + inheritp->function_map_offset];
                 if (*fx == USHRT_MAX)
                 {
                     /* There was no corresponding function in the new program.
@@ -7762,7 +7820,7 @@ setup_inherited_call (unsigned short inhIndex, unsigned short *fx)
                     else
                         errorf("Dangling function call to '%s' in program '%s'.\n", get_txt(fun->name), get_txt(inheritp->prog->name));
                 }
-                inheritp = current_object->prog->inherit + inheritp->updated_inherit;
+                inheritp = obprog->inherit + inheritp->updated_inherit;
             }
         }
         else if(inheritp->inherit_type != INHERIT_TYPE_NORMAL)
@@ -7772,7 +7830,7 @@ setup_inherited_call (unsigned short inhIndex, unsigned short *fx)
              * because they point to the non-virtual variables.
              */
 
-            current_variables = current_object->variables;
+            current_variables = get_current_object_variables();
             variable_index_offset = 0;
             assert(function_index_offset == 0); /* We should be at the topmost program. */
         }
@@ -7831,7 +7889,7 @@ setup_new_frame1 (int fx, int fun_ix_offs, int var_ix_offs)
         inherit_t *inheritp;
 
         inheritp = &progp->inherit[flags & INHERIT_MASK];
-        assert(!(inheritp->inherit_type & INHERIT_TYPE_MAPPED));
+        assert(!inheritp->inherit_mapped);
 
         if(inheritp->inherit_type != INHERIT_TYPE_NORMAL)
         {
@@ -8051,15 +8109,16 @@ setup_new_frame (int fx, program_t *inhProg)
     funflag_t flags;
 
     /* We must be at the topmost level in the inherit hierarchy. */
-    assert(current_prog == current_object->prog);
+    assert(current_prog == get_current_object_program());
 
     if (inhProg)
     {
-        program_t *progp;
+        program_t *progp, *obprogp;
         int       fun_ix_offs;
         int       var_ix_offs;
 
         progp = current_prog;
+        obprogp = get_current_object_program();
         fun_ix_offs = 0;
         var_ix_offs = progp->num_virtual_variables;
 
@@ -8081,7 +8140,7 @@ setup_new_frame (int fx, program_t *inhProg)
             inheritp = search_function_inherit(progp, fx);
             fx -= inheritp->function_index_offset;
 
-            inh = adjust_variable_offsets(inheritp, progp, current_object);
+            inh = adjust_variable_offsets(inheritp, progp, obprogp);
             if (inh)
             {
                 /* Virtual base class. Reset offsets. */
@@ -8090,12 +8149,12 @@ setup_new_frame (int fx, program_t *inhProg)
                 var_ix_offs = 0;
 
                 /* Check for obsoleted inherited programs. */
-                while (inheritp->inherit_type & INHERIT_TYPE_MAPPED)
+                while (inheritp->inherit_mapped)
                 {
-                    fx = current_object->prog->update_index_map[fx + inheritp->function_map_offset];
+                    fx = obprogp->update_index_map[fx + inheritp->function_map_offset];
                     if (fx == USHRT_MAX)
                         errorf("Dangling function call in program '%s'.\n", get_txt(inheritp->prog->name));
-                    inheritp = current_object->prog->inherit + inheritp->updated_inherit;
+                    inheritp = obprogp->inherit + inheritp->updated_inherit;
                 }
             }
 
@@ -8127,14 +8186,16 @@ setup_new_frame (int fx, program_t *inhProg)
     csp->funstart = current_prog->program + (flags & FUNSTART_MASK);
 
     inter_sp = setup_new_frame2(csp->funstart, inter_sp, MY_FALSE);
+    current_variables = get_current_object_variables();
 #ifdef DEBUG
-    if (!current_object->variables && variable_index_offset)
+    if (!current_variables && variable_index_offset)
         fatal("%s Fatal: new frame for object %p '%s' w/o variables, "
               "but offset %d\n"
-             , time_stamp(), current_object, get_txt(current_object->name)
+             , time_stamp()
+             , current_object.type == T_OBJECT ? (void*)current_object.u.ob : (void*)current_object.u.lwob
+             , get_txt(current_object.type == T_OBJECT ? current_object.u.ob->name : current_object.u.lwob->prog->name)
              , variable_index_offset);
 #endif
-    current_variables = current_object->variables;
     if (current_variables)
         current_variables += variable_index_offset;
     current_strings = current_prog->strings;
@@ -8170,6 +8231,7 @@ reset_machine (Bool first)
         {
             if (csp->lambda.type == T_CLOSURE)
                 free_closure(&csp->lambda);
+            free_svalue(&(csp->pretend_to_be));
             csp--;
         }
     }
@@ -8249,12 +8311,12 @@ free_interpreter_temporaries (void)
         {
             object_t *ob;
 
-            if (NULL != (ob = previous_objects[i])
-             && ob->flags & O_DESTRUCTED
+            if (previous_objects[i].type == T_OBJECT
+             && ((ob=previous_objects[i].u.ob)->flags & O_DESTRUCTED)
                )
             {
                 free_object(ob, "free_interpreter_temporaries");
-                previous_objects[i] = NULL;
+                previous_objects[i] = const0;
                 previous_instruction[i] = 0;
             }
         }
@@ -8314,12 +8376,12 @@ put_default_argument (svalue_t *sp, int instruction)
         break;
 
     case F_THIS_OBJECT:
-        if (current_object->flags & O_DESTRUCTED)
+        if (is_current_object_destructed())
         {
             put_number(sp, 0);
             break;
         }
-        put_ref_object(sp, current_object, "default: this_object");
+        assign_current_object_no_free(sp, "default: this_object");
         break;
 
     case F_THIS_PLAYER:
@@ -8560,12 +8622,7 @@ again:
         previous_pc[last] = pc-1;
         stack_size[last] = sp - fp - csp->num_local_variables;
         abs_stack_size[last] = sp - VALUE_STACK;
-        if (previous_objects[last])
-        {
-            /* Need to free the previously stored object */
-            free_object(previous_objects[last], "TRACE_CODE");
-        }
-        previous_objects[last] = ref_object(current_object, "TRACE_CODE");
+        assign_current_object(previous_objects + last, "TRACE_CODE");
         previous_programs[last] = current_prog;
 #   endif  /* ifdef TRACE_CODE */
 
@@ -8773,6 +8830,11 @@ again:
 #endif
         inter_sp = sp;
         inter_pc = pc;
+
+        if (current_object.type == T_LWOBJECT
+         && instrs[code + EFUN0_OFFSET].no_lightweight)
+            errorf("%s() from lightweight object.\n", instrs[code + EFUN0_OFFSET].name);
+
         assign_eval_cost_inl();
         sp = (*efun_table[code+EFUN0_OFFSET-TEFUN_OFFSET])(sp);
 #ifdef CHECK_OBJECT_REF
@@ -8822,6 +8884,10 @@ again:
 #endif
         inter_sp = sp;
         inter_pc = pc;
+
+        if (current_object.type == T_LWOBJECT && instrs[instruction].no_lightweight)
+            errorf("%s() from lightweight object.\n", instrs[instruction].name);
+
         assign_eval_cost_inl();
         test_efun_args(instruction, 1, sp);
         sp = (*efun_table[instruction-TEFUN_OFFSET])(sp);
@@ -8872,6 +8938,10 @@ again:
 #endif
         inter_sp = sp;
         inter_pc = pc;
+
+        if (current_object.type == T_LWOBJECT && instrs[instruction].no_lightweight)
+            errorf("%s() from lightweight object.\n", instrs[instruction].name);
+
         assign_eval_cost_inl();
         test_efun_args(instruction, 2, sp-1);
         sp = (*efun_table[instruction-TEFUN_OFFSET])(sp);
@@ -8923,6 +8993,10 @@ again:
 #endif
         inter_sp = sp;
         inter_pc = pc;
+
+        if (current_object.type == T_LWOBJECT && instrs[instruction].no_lightweight)
+            errorf("%s() from lightweight object.\n", instrs[instruction].name);
+
         assign_eval_cost_inl();
         test_efun_args(instruction, 3, sp-2);
         sp = (*efun_table[instruction-TEFUN_OFFSET])(sp);
@@ -8973,6 +9047,10 @@ again:
 #endif
         inter_sp = sp;
         inter_pc = pc;
+
+        if (current_object.type == T_LWOBJECT && instrs[instruction].no_lightweight)
+            errorf("%s() from lightweight object.\n", instrs[instruction].name);
+
         assign_eval_cost_inl();
         test_efun_args(instruction, 4, sp-3);
         sp = (*efun_table[instruction-TEFUN_OFFSET])(sp);
@@ -9009,6 +9087,10 @@ again:
 
         inter_sp = sp;
         inter_pc = pc;
+
+        if (current_object.type == T_LWOBJECT && instrs[instruction].no_lightweight)
+            errorf("%s() from lightweight object.\n", instrs[instruction].name);
+
         assign_eval_cost_inl();
 
         min_arg = instrs[instruction].min_arg;
@@ -9293,21 +9375,36 @@ again:
 #endif
             sp++;
             sp->type = T_CLOSURE;
-            sp->u.ob = ref_object(current_object, "closure");
+            if (current_object.type == T_OBJECT)
+            {
+                sp->u.ob = ref_object(current_object.u.ob, "closure");
+                sp->x.closure_type = 0;
+            }
+            else
+            {
+                sp->u.lwob = ref_lwobject(current_object.u.lwob);
+                sp->x.closure_type = CLOSURE_LWO;
+            }
+
             if (ix >= CLOSURE_SIMUL_EFUN_OFFS)
             {
                 /* Sefun closure */
-                sp->x.closure_type = (short)ix;
+                sp->x.closure_type += (short)ix;
             }
 #ifdef USE_PYTHON
             else if (ix < CLOSURE_EFUN_OFFS)
             {
                 /* python-defined efun closure */
-                sp->x.closure_type = (short)ix;
+                sp->x.closure_type += (short)ix;
             }
 #endif
             else
             {
+                sp->x.closure_type
+                  += (short)( instrs[ix - CLOSURE_EFUN_OFFS].Default == -1
+                            ? ix + CLOSURE_OPERATOR-CLOSURE_EFUN
+                            : ix);
+
                 /* Efun or operator closure */
                 if (!runtime_no_warn_deprecated
                  && instrs[ix - CLOSURE_EFUN_OFFS].deprecated != NULL)
@@ -9317,11 +9414,6 @@ again:
                           , instrs[ix - CLOSURE_EFUN_OFFS].deprecated
                          ));
                 }
-
-                sp->x.closure_type
-                  = (short)(  instrs[ix - CLOSURE_EFUN_OFFS].Default == -1
-                            ? ix + CLOSURE_OPERATOR-CLOSURE_EFUN
-                            : ix);
             }
         }
         break;
@@ -9462,6 +9554,7 @@ again:
         if (current_lambda.type == T_CLOSURE)
             free_closure(&current_lambda);
         current_lambda = csp->lambda;
+        free_svalue(&(csp->pretend_to_be));
 
         tracedepth--; /* We leave this level */
 
@@ -11546,6 +11639,9 @@ again:
             case T_OBJECT:
                 i = (sp-1)->u.ob == sp->u.ob;
                 break;
+            case T_LWOBJECT:
+                i = (sp-1)->u.lwob == sp->u.lwob;
+                break;
             case T_FLOAT:
                 i = READ_DOUBLE( sp-1 ) == READ_DOUBLE( sp );
                 break;
@@ -11621,6 +11717,9 @@ again:
                 break;
             case T_OBJECT:
                 i = (sp-1)->u.ob != sp->u.ob;
+                break;
+            case T_LWOBJECT:
+                i = (sp-1)->u.lwob != sp->u.lwob;
                 break;
             case T_FLOAT:
                 i = READ_DOUBLE( sp-1 ) != READ_DOUBLE( sp );
@@ -14162,7 +14261,8 @@ again:
            */
         funflag_t  flags;     /* the function flags */
         bytecode_p  funstart;  /* the actual function (code) */
-        
+        program_t *prog;       /* The current object's program. */
+
         /* Make sure that we are not calling from a set_this_object()
          * context.
          */
@@ -14182,19 +14282,23 @@ again:
          * which is pointed to by current_object.
          */
 
-        if (obj_func_index >= current_object->prog->num_functions)
+        prog = get_current_object_program();
+        if (obj_func_index >= prog->num_functions)
         {
             fatal("call_function: "
                   "Illegal function index: within object %hu (within program %hu), "
-                  "%d functions - current object %s\n"
+                  "%d functions - current %sobject %s\n"
                  , obj_func_index, prog_func_index
-                 , current_object->prog->num_functions
-                 , get_txt(current_object->name)
+                 , prog->num_functions
+                 , current_object.type == T_LWOBJECT ? "lightweight " : ""
+                 , get_txt(current_object.type == T_OBJECT
+                         ? current_object.u.ob->name
+                         : current_object.u.lwob->prog->name)
                  );
         }
 
         /* NOT current_prog, which can be an inherited object. */
-        flags = current_object->prog->functions[obj_func_index];
+        flags = prog->functions[obj_func_index];
 
         /* If the function was cross-defined, get the real offset */
         if (flags & NAME_CROSS_DEFINED)
@@ -14209,7 +14313,7 @@ again:
          * the control stack push, since here is where we search for
          * the function.
          */
-        current_prog = current_object->prog;
+        current_prog = prog;
 
         /* Search for the function definition and determine the offsets.
          */
@@ -14227,14 +14331,16 @@ again:
 
         /* Finish the setup */
 
+        current_variables = get_current_object_variables();
 #ifdef DEBUG
-        if (!current_object->variables && variable_index_offset)
+        if (!current_variables && variable_index_offset)
             fatal("%s Fatal: call function for object %p '%s' w/o variables, "
                   "but offset %d\n"
-                 , time_stamp(), current_object, get_txt(current_object->name)
+                 , time_stamp()
+                 , current_object.type == T_OBJECT ? (void*)current_object.u.ob : (void*)current_object.u.lwob
+                 , get_txt(current_object.type == T_OBJECT ? current_object.u.ob->name : current_object.u.lwob->prog->name)
                  , variable_index_offset);
 #endif
-        current_variables = current_object->variables;
         if (current_variables)
             current_variables += variable_index_offset;
         current_strings = current_prog->strings;
@@ -14338,7 +14444,7 @@ again:
         /* Finish the setup */
         fp = inter_fp;
         pc = inter_pc;
-        current_variables = current_object->variables;
+        current_variables = get_current_object_variables();
         if (current_variables)
             current_variables += variable_index_offset;
         current_strings = current_prog->strings;
@@ -14362,13 +14468,13 @@ again:
             /* No external calls may be done when this object is
              * destructed.
              */
-            if (current_object->flags & O_DESTRUCTED)
+            if (is_current_object_destructed())
             {
                 sp = _pop_n_elems(num_arg, sp);
                 push_number(sp, 0);
                 inter_sp = sp;
                 warnf("Call from destructed object '%s' ignored.\n"
-                     , get_txt(current_object->name));
+                     , get_txt(current_object.u.ob->name));
                 return sp;
             }
 
@@ -15127,12 +15233,12 @@ again:
 
         /* No external calls may be done when this object is destructed.
          */
-        if (current_object->flags & O_DESTRUCTED)
+        if (is_current_object_destructed())
         {
             pop_n_elems(num_arg);
             push_number(sp, 0);
             WARNF(("Call from destructed object '%s' ignored.\n"
-                  , get_txt(current_object->name)));
+                  , get_txt(current_object.u.ob->name)));
             break;
         }
 
@@ -15188,7 +15294,7 @@ again:
 
             /* The simul_efun object should not use simul_efuns itself... */
             previous_ob = current_object;
-            current_object = ob;
+            set_current_object(ob);
             current_strings = prog->strings;
             eval_instruction(inter_pc, new_sp);
             sp -= num_arg - 1;
@@ -15239,6 +15345,73 @@ again:
         break;
     }
 #endif /* USE_PYTHON */
+
+    CASE(F_CALL_OTHER_CACHED);      /* --- call_other_cached <cache_idx>  --- */
+    CASE(F_CALL_STRICT_CACHED);     /* --- call_strict_cached <cache_idx> --- */
+    {
+        /* Do a call_other() or call_strict(), but if the target object is a
+         * lightweight object, use and update the program's call cache entry
+         * <cache_idx>.
+         */
+        bool strict =  (instruction == F_CALL_STRICT_CACHED);
+        unsigned short cache_idx;
+
+        LOAD_SHORT(cache_idx, pc);
+        num_arg = sp - ap + 1;
+        use_ap = MY_FALSE;
+
+        assert(num_arg >= 2); /* This opcode can't be used otherwise. */
+
+        if (ap[0].type == T_LWOBJECT)
+        {
+            /* This opcode is only used for constant function names. */
+            assert(ap[1].type == T_STRING);
+
+            /* Handle traceing. */
+            if (TRACEP(TRACE_CALL_OTHER) && TRACE_IS_INTERACTIVE())
+            {
+                if (!++traceing_recursion)
+                {
+                    inter_sp = sp;
+                    do_trace("Call other ", get_txt(ap[1].u.str), "\n");
+                }
+                traceing_recursion--;
+            }
+
+            if (apply_lwob(ap[1].u.str, ap[0].u.lwob, num_arg-2, false, current_prog->lwo_call_cache + cache_idx))
+            {
+                /* On the stack there is now the lwobject, function name and result. */
+                _pop_n_elems(2, inter_sp - 1);
+                transfer_svalue_no_free(ap, inter_sp);
+                sp = ap;
+            }
+            else
+            {
+                if (strict)
+                    errorf("Function %.50s() not found in /%s.\n"
+                         , get_txt(ap[1].u.str)
+                         , get_txt(ap[0].u.lwob->prog->name));
+                sp = _pop_n_elems(2, inter_sp);
+            }
+        }
+        else
+        {
+            /* Uncached call, call the original efuns. */
+            inter_sp = sp;
+            inter_pc = pc;
+            assign_eval_cost_inl();
+
+            test_efun_args(strict ? F_CALL_STRICT : F_CALL_OTHER, num_arg, sp-num_arg+1);
+            if (strict)
+                sp = v_call_strict(sp, num_arg);
+            else
+                sp = v_call_other(sp, num_arg);
+#ifdef CHECK_OBJECT_REF
+            check_all_object_shadows();
+#endif /* CHECK_OBJECT_REF */
+        }
+        break;
+    }
 
     CASE(F_AGGREGATE);              /* --- aggregate <size>    --- */
     {
@@ -15469,10 +15642,10 @@ again:
          * (Reminder: the efun previous_object(int) has a different meaning.)
          * TODO: How do other driver handle this?
          */
-        if (previous_ob == 0 || (previous_ob->flags & O_DESTRUCTED))
+        if (previous_ob.type == T_OBJECT && (previous_ob.u.ob->flags & O_DESTRUCTED))
             push_number(sp, 0);
         else
-            push_ref_object(sp, previous_ob, "previous_object0");
+            assign_object_svalue_no_free(++sp, previous_ob, "previous_object()");
         break;
 
     CASE(F_LAMBDA_CCONSTANT);    /* --- lambda_cconstant <num> --- */
@@ -16525,6 +16698,23 @@ again:
         break;
     }
 
+    CASE(F_LWOBJECTP);              /* --- lwobjectp            --- */
+    {
+        /* EFUN lwobjectp()
+         *
+         *   int lwobjectp(mixed)
+         *
+         * Returns 1 if the argument is a lightweight object.
+         */
+
+        int i;
+
+        i = sp->type == T_LWOBJECT;
+        free_svalue(sp);
+        put_number(sp, i);
+        break;
+    }
+
     CASE(F_POINTERP);               /* --- pointerp            --- */
     {
         /* EFUN pointerp()
@@ -16875,17 +17065,17 @@ again:
     CASE(F_THIS_OBJECT);            /* --- this_object         --- */
         /* EFUN this_object()
          *
-         *   object this_object(void)
+         *   object|lwobject this_object(void)
          *
          * Return the object pointer for this object.
          */
 
-        if (current_object->flags & O_DESTRUCTED)
+        if (is_current_object_destructed())
         {
             push_number(sp, 0);
             break;
         }
-        push_ref_object(sp, current_object, "this_object");
+        push_current_object(sp, "this_object");
         break;
 
     /* --- Efuns: Verbs and Commands --- */
@@ -16957,7 +17147,7 @@ again:
         if (!flags)
             flags = 3;
 
-        if (ob != current_object
+        if (ob != get_current_object()
          && !(ob->flags & O_DESTRUCTED)
           ) /* should also check csp */
         {
@@ -17084,6 +17274,226 @@ again:
 } /* eval_instruction() */
 
 /*-------------------------------------------------------------------------*/
+static bool
+apply_prog (string_t *fun, program_t *progp, svalue_t ob, int num_arg, bool b_ign_prot, bool b_ign_static, call_cache_t *cache_entry)
+
+/* Does a call into the program <progp> to function <fun> with <num_arg>
+ * arguments on the stack. <fun> must be a tabled string.
+ * <ob> will be the new value for the current object and must be either
+ * a T_OBJECT or T_LWOBJECT.
+ *
+ * If <b_ign_prot> is true, then protected functions can be called.
+ * If <b_ign_static> is true, then static functions can be called.
+ * If <cache_entry> is not NULl, it will be used instead of the global
+ * apply cache.
+ *
+ * Returns true on success. In that case the arguments on the stack
+ * have been replaced by the result. Otherwise the arguments will be
+ * left on the stack.
+ */
+{
+    struct control_stack *save_csp;
+    bytecode_p funstart;
+    int fx;
+
+    /* Functions with these flags we can't call:
+     * Static functions may not be called from outside.
+     * Protected functions not even from the inside
+     * And undefined functions are never found by name.
+     */
+    funflag_t inacceptable_flags = (!b_ign_static ? TYPE_MOD_STATIC    : 0)
+                                 | (!b_ign_prot   ? TYPE_MOD_PROTECTED : 0)
+                                 | NAME_UNDEFINED;
+    /* Just to make sure... */
+    if (!fun)
+        return false;
+
+    /* Get the corresponding entry of the cache */
+    if (!cache_entry)
+        cache_entry = cache + ((progp->id_number ^ (p_int)fun ^ ((p_int)fun >> APPLY_CACHE_BITS)) & (CACHE_SIZE-1));
+
+    /* Check if we the entry matches this function call */
+    if (cache_entry->id == progp->id_number && cache_entry->name == fun)
+    {
+        /* We have found a matching entry in the cache.
+         */
+#ifdef APPLY_CACHE_STAT
+        apply_cache_hit++;
+#endif
+
+        if (cache_entry->progp && !(cache_entry->flags & inacceptable_flags))
+        {
+
+            /* Check for deprecated functions before pushing a new control stack frame.
+             */
+            if (cache_entry->flags & TYPE_MOD_DEPRECATED)
+                warnf("Call to deprecated function \'%s\' in %sobject %s (%s).\n",
+                      get_txt(fun), ob.type == T_LWOBJECT ? "lightweight ": "",
+                      get_txt(ob.type == T_LWOBJECT ? ob.u.lwob->prog->name : ob.u.ob->name),
+                      get_txt(progp->name));
+
+            push_control_stack(inter_sp, inter_pc, inter_fp, inter_context);
+            csp->ob = current_object;
+            csp->prev_ob = previous_ob;
+            csp->num_local_variables = num_arg;
+            csp->funstart = funstart = cache_entry->funstart;
+            current_prog = cache_entry->progp;
+            function_index_offset = cache_entry->function_index_offset;
+            variable_index_offset = cache_entry->variable_index_offset;
+
+            fx = current_prog->function_headers[FUNCTION_HEADER_INDEX(funstart)].offset.fx;
+        }
+        else
+            return false;
+    }
+    else
+    {
+        /* we have to search the function */
+
+#ifdef APPLY_CACHE_STAT
+        apply_cache_miss++;
+#endif
+
+        eval_cost++;
+        total_evalcost++;
+        fx = find_function(fun, progp);
+        if (fx >= 0)
+        {
+            /* Found the function - put it into the cache.
+             */
+            funflag_t flags;
+
+            // check for deprecated functions before pushing a new control stack frame.
+            if (progp->functions[fx] & TYPE_MOD_DEPRECATED)
+                warnf("Call to deprecated function \'%s\' in %sobject %s (%s).\n",
+                      get_txt(fun), ob.type == T_LWOBJECT ? "lightweight ": "",
+                      get_txt(ob.type == T_LWOBJECT ? ob.u.lwob->prog->name : ob.u.ob->name),
+                      get_txt(progp->name));
+
+            push_control_stack(inter_sp, inter_pc, inter_fp, inter_context);
+              /* if an error occurs here, it won't leave the cache in an
+               * inconsistent state.
+               */
+            csp->ob = current_object;
+            csp->prev_ob = previous_ob;
+            csp->num_local_variables = num_arg;
+            current_prog = progp;
+            flags = setup_new_frame1(fx, 0, current_prog->num_virtual_variables);
+            csp->funstart = funstart = current_prog->program + (flags & FUNSTART_MASK);
+
+            if (cache_entry->name)
+                free_mstring(cache_entry->name);
+            cache_entry->id = progp->id_number;
+            cache_entry->name = ref_mstring(fun);
+            cache_entry->progp = current_prog;
+            cache_entry->function_index_offset = function_index_offset;
+            cache_entry->variable_index_offset = variable_index_offset;
+            cache_entry->funstart = funstart;
+            cache_entry->flags = (progp->functions[fx]
+                               & (TYPE_MOD_STATIC|TYPE_MOD_PROTECTED|TYPE_MOD_DEPRECATED))
+                            | (GET_CODE(funstart) == F_UNDEF ? NAME_UNDEFINED : 0);
+
+            if (cache_entry->flags & inacceptable_flags)
+            {
+                /* Not found, we have to revert to the previous
+                 * control stack entry.
+                 */
+                previous_ob = csp->prev_ob;
+                current_object = csp->ob;
+                pop_control_stack();
+                return false;
+            }
+
+            fx -= function_index_offset; /* Now relative to current_prog. */
+        }
+        else /* fx < 0, not founnd. */
+        {
+            /* We have to mark this function as non-existant in this object. */
+
+            if (cache_entry->name)
+                free_mstring(cache_entry->name);
+
+            cache_entry->id = progp->id_number;
+            cache_entry->name = ref_mstring(fun);
+            cache_entry->progp = NULL;
+            return false;
+        }
+    }
+
+    /* When we come here, we have found the function, set up the control
+     * stack and calculated the current_prog with its offsets.
+     */
+
+    current_strings = current_prog->strings;
+    current_variables = ob.type == T_LWOBJECT ? ob.u.lwob->variables : ob.u.ob->variables;
+    if (current_variables)
+        current_variables += variable_index_offset;
+#ifdef DEBUG
+    else if (variable_index_offset)
+        fatal("%s Fatal: apply (cached) for %sobject %p '%s' "
+              "w/o variables, but offset %d\n"
+             , time_stamp()
+             , ob.type == T_LWOBJECT ? "lightweight ": ""
+             , ob.type == T_LWOBJECT ? (void*)ob.u.lwob : (void*)ob.u.ob
+             , get_txt(ob.type == T_LWOBJECT ? ob.u.lwob->prog->name : ob.u.ob->name)
+             , variable_index_offset);
+#endif
+
+    inter_sp = setup_new_frame2(funstart, inter_sp, MY_FALSE);
+
+    // check argument types
+    check_function_args(fx, current_prog, funstart);
+
+    previous_ob = current_object;
+    current_object = ob;
+    save_csp = csp;
+    eval_instruction(inter_pc, inter_sp);
+#ifdef DEBUG
+    if (save_csp-1 != csp)
+        fatal("Bad csp after execution in apply_low\n");
+#endif
+    /* Arguments and local variables are now removed. One
+     * resulting value is always returned on the stack.
+     */
+
+    return true;
+
+} /* apply_prog() */
+
+/*-------------------------------------------------------------------------*/
+static bool
+apply_lwob (string_t *fun, lwobject_t *lwob, int num_arg, bool b_ign_prot, call_cache_t *cache_entry)
+
+/* Does a function call by name to a lightweight object.
+ *
+ * Call function <fun> in <lwob> with <num_arg> arguments.
+ * <inter_sp> points to the last one. If <b_ign_prot> is true, then
+ * static and protected functions can also be called.
+ *
+ * apply_lowob() will remove the arguments from the stack. The function
+ * returns true on success, the result will be placed on the stack.
+ * If the function is not found, false is returned and no element on the
+ * stack.
+ */
+{
+    if (!mstr_tabled(fun))
+    {
+        fun = find_tabled(fun);
+        if (!fun)
+        {
+            inter_sp = _pop_n_elems(num_arg, inter_sp);
+            return false;
+        }
+    }
+
+    if (apply_prog(fun, lwob->prog, svalue_lwobject(lwob), num_arg, b_ign_prot, b_ign_prot || (get_current_lwobject() == lwob), cache_entry))
+        return true;
+
+    inter_sp = _pop_n_elems(num_arg, inter_sp);
+    return false;
+} /* apply_lwob() */
+
+/*-------------------------------------------------------------------------*/
 static Bool
 apply_low ( string_t *fun, object_t *ob, int num_arg
           , Bool b_ign_prot)
@@ -17111,8 +17521,6 @@ apply_low ( string_t *fun, object_t *ob, int num_arg
 
 {
     program_t *progp;
-    struct control_stack *save_csp;
-    p_int ix;
 
     /* This object will now be used, and is thus a target for
      * reset later on (when time due).
@@ -17132,9 +17540,10 @@ apply_low ( string_t *fun, object_t *ob, int num_arg
     if (ob->flags & O_SHADOW)
     {
         object_t *shadow;
+        object_t *curobj = get_current_object();
 
         while (NULL != (shadow = O_GET_SHADOW(ob)->shadowed_by)
-            && shadow != current_object)
+            && shadow != curobj)
         {
             ob = shadow;
         }
@@ -17171,219 +17580,11 @@ retry_for_shadow:
         if (!fun)
             goto failure2;
     }
+
     /* fun is now guaranteed to be a shared string */
 
-    /* Get the hashed index into the cache */
-    ix =
-      ( progp->id_number ^ (p_int)fun ^ ( (p_int)fun >> APPLY_CACHE_BITS ) )
-         & (CACHE_SIZE-1);
-
-    /* Check if we have an entry for this function call */
-    if (cache[ix].id == progp->id_number
-     && (cache[ix].name == fun || mstreq(cache[ix].name, fun))
-       )
-    {
-        /* We have found a matching entry in the cache. The contents have
-         * to match, not only the pointers, because cache entries for
-         * functions not existant in _this_ object <ob> are stored as
-         * separately allocated copy, not as another ref to the shared
-         * string. Yet they shall be found here.
-         */
-#ifdef APPLY_CACHE_STAT
-        apply_cache_hit++;
-#endif
-        if (cache[ix].progp
-          /* Static functions may not be called from outside.
-           * Protected functions not even from the inside
-           * And undefined functions are never found by name.
-           */
-          && !(cache[ix].flags &
-                 ((!b_ign_prot && current_object != ob ? TYPE_MOD_STATIC    : 0)
-                 |(!b_ign_prot                         ? TYPE_MOD_PROTECTED : 0)
-                 | NAME_UNDEFINED
-                 )
-             )
-           )
-        {
-            /* the cache will tell us in wich program the function is, and
-             * where.
-             */
-            bytecode_p funstart;
-            
-            // check for deprecated functions before pushing a new control stack frame.
-            if (cache[ix].flags & TYPE_MOD_DEPRECATED)
-                warnf("Callother to deprecated function \'%s\' in object %s (%s).\n",
-                      get_txt(fun), get_txt(ob->name), get_txt(ob->prog->name));
-
-            push_control_stack(inter_sp, inter_pc, inter_fp, inter_context);
-            csp->ob = current_object;
-            csp->prev_ob = previous_ob;
-            csp->num_local_variables = num_arg;
-            csp->funstart = funstart = cache[ix].funstart;
-            current_prog = cache[ix].progp;
-            current_strings = current_prog->strings;
-            function_index_offset = cache[ix].function_index_offset;
-            variable_index_offset = cache[ix].variable_index_offset;
-#ifdef DEBUG
-            if (!ob->variables && cache[ix].variable_index_offset)
-                fatal("%s Fatal: apply (cached) for object %p '%s' "
-                      "w/o variables, but offset %d\n"
-                     , time_stamp(), ob, get_txt(ob->name)
-                     , cache[ix].variable_index_offset);
-#endif
-            current_variables = ob->variables;
-            if (current_variables)
-                current_variables += variable_index_offset;
-            inter_sp = setup_new_frame2(funstart, inter_sp, MY_FALSE);
-                        
-            // check argument types
-            check_function_args(cache[ix].progp->function_headers[FUNCTION_HEADER_INDEX(funstart)].offset.fx, cache[ix].progp, funstart);
-            
-            previous_ob = current_object;
-            current_object = ob;
-            save_csp = csp;
-            eval_instruction(inter_pc, inter_sp);
-#ifdef DEBUG
-            if (save_csp-1 != csp)
-                fatal("Bad csp after execution in apply_low\n");
-#endif
-            /* Arguments and local variables are now removed. One
-             * resulting value is always returned on the stack.
-             */
-            return MY_TRUE;
-        }
-
-        /* when we come here, the cache has told us that the function isn't
-         * defined in the object
-         */
-    }
-    else
-    {
-        /* we have to search the function */
-
-#ifdef APPLY_CACHE_STAT
-        apply_cache_miss++;
-#endif
-
-        if ( NULL != fun)
-        {
-            int fx;
-
-            /* Yup, fun is a function _somewhere_ */
-
-            eval_cost++;
-            total_evalcost++;
-            fx = find_function(fun, progp);
-            if (fx >= 0)
-            {
-                /* Found the function - setup the control stack and
-                 * create a new cache entry.
-                 */
-
-                funflag_t flags;
-                bytecode_p funstart;
-
-                // check for deprecated functions before pushing a new control stack frame.
-                if (progp->functions[fx] & TYPE_MOD_DEPRECATED)
-                    warnf("Callother to deprecated function \'%s\' in object %s (%s).\n",
-                          get_txt(fun), get_txt(ob->name), get_txt(ob->prog->name));
-                push_control_stack(inter_sp, inter_pc, inter_fp, inter_context);
-                  /* if an error occurs here, it won't leave the cache in an
-                   * inconsistent state.
-                   */
-                csp->ob = current_object;
-                csp->prev_ob = previous_ob;
-                if (cache[ix].name)
-                    free_mstring(cache[ix].name);
-
-                cache[ix].id = progp->id_number;
-                cache[ix].name = ref_mstring(fun);
-
-                csp->num_local_variables = num_arg;
-                current_prog = progp;
-                flags = setup_new_frame1(fx, 0, current_prog->num_virtual_variables);
-                
-                current_strings = current_prog->strings;
-
-                cache[ix].progp = current_prog;
-                cache[ix].function_index_offset = function_index_offset;
-                cache[ix].variable_index_offset = variable_index_offset;
-
-#ifdef DEBUG
-                if (!ob->variables && variable_index_offset)
-                    fatal("%s Fatal: apply for object %p '%s' w/o variables, "
-                          "but offset %d\n"
-                         , time_stamp(), ob, get_txt(ob->name)
-                         , variable_index_offset);
-#endif
-                current_variables = ob->variables;
-                if (current_variables)
-                    current_variables += variable_index_offset;
-                funstart = current_prog->program + (flags & FUNSTART_MASK);
-
-                cache[ix].funstart = funstart;
-                cache[ix].flags = (progp->functions[fx]
-                                   & (TYPE_MOD_STATIC|TYPE_MOD_PROTECTED|TYPE_MOD_DEPRECATED))
-                                | (GET_CODE(funstart) == F_UNDEF ? NAME_UNDEFINED : 0);
-
-                /* Static functions may not be called from outside,
-                 * Protected functions not even from the inside.
-                 * And undefined functions are never found by name.
-                 */
-                if (cache[ix].flags &
-                     ((!b_ign_prot && current_object != ob ? TYPE_MOD_STATIC    : 0)
-                     |(!b_ign_prot                         ? TYPE_MOD_PROTECTED : 0)
-                     | NAME_UNDEFINED
-                     )
-                   )
-                {
-                    /* Not found */
-
-                    previous_ob = csp->prev_ob;
-                    current_object = csp->ob;
-                    pop_control_stack();
-                    if (ob->flags & O_SHADOW && O_GET_SHADOW(ob)->shadowing)
-                    {
-                        /* This is an object shadowing another. The function
-                         * was not found, but can maybe be found in the object
-                         * we are shadowing.
-                         */
-                        ob = O_GET_SHADOW(ob)->shadowing;
-                        goto retry_for_shadow;
-                    }
-                    else
-                        goto failure;
-                }
-                csp->funstart = funstart;
-                inter_sp = setup_new_frame2(funstart, inter_sp, MY_FALSE);
-
-                // check argument types
-                check_function_args(fx - function_index_offset, current_prog, funstart);
-
-                previous_ob = current_object;
-                current_object = ob;
-                save_csp = csp;
-                eval_instruction(inter_pc, inter_sp);
-#ifdef DEBUG
-                if (save_csp-1 != csp)
-                    fatal("Bad csp after execution in apply_low\n");
-#endif
-                /* Arguments and local variables are now removed. One
-                 * resulting value is always returned on the stack.
-                 */
-                return MY_TRUE;
-            } /* end if (fx >= 0) */
-        } /* end if(fun) */
-
-        /* We have to mark this function as non-existant in this object. */
-
-        if (cache[ix].name)
-            free_mstring(cache[ix].name);
-
-        cache[ix].id = progp->id_number;
-        cache[ix].name = ref_mstring(fun);
-        cache[ix].progp = NULL;
-    }
+    if (apply_prog(fun, progp, svalue_object(ob), num_arg, b_ign_prot, b_ign_prot || (get_current_object() == ob), NULL))
+        return MY_TRUE;
 
     /* At this point, the function was not found in the object. But
      * maybe this object is a shadow and we find the function in the
@@ -17567,6 +17768,61 @@ pop_apply_value (void)
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
+sapply_lwob_int (string_t *fun, lwobject_t *lwob, int num_arg, bool b_find_static)
+
+/* Aliases:
+ *   sapply_lwob(fun, ob, num_arg)          == sapply_lwob_int(fun, ob, num_arg, false)
+ *   sapply_lwob_ign_prot(fun, ob, num_arg) == sapply_lwob_int(fun, ob, num_arg, true)
+ *
+ * Call function <fun> in the lightweight object <lwob> with <num_arg>
+ * arguments on the stack (<inter_sp> points to the last argument).
+ * static and protected functions can't called unless <b_find_static> is true
+ * (or for static functions it is called from within the object).
+ *
+ * sapply_lwob() returns a pointer to the function result on success,
+ * or NULL on failure. The arguments are removed from the stack in any case.
+ * The result pointer, if returned, points to a static area which will be
+ * overwritten with the next sapply().
+ */
+
+{
+#ifdef DEBUG
+    svalue_t *expected_sp;
+#endif
+
+    /* Handle tracing */
+    if (TRACEP(TRACE_APPLY) && TRACE_IS_INTERACTIVE())
+    {
+        if (!++traceing_recursion)
+        {
+            do_trace("Apply", "", "\n");
+        }
+        traceing_recursion--;
+    }
+
+#ifdef DEBUG
+    expected_sp = inter_sp - num_arg;
+#endif
+
+    /* Do the call */
+    if (!apply_lwob(fun, lwob, num_arg, b_find_static, NULL))
+        return NULL;
+
+    free_svalue(&apply_return_value);
+    transfer_svalue_no_free(&apply_return_value, inter_sp);
+    inter_sp--;
+
+#ifdef DEBUG
+    if (expected_sp != inter_sp)
+        fatal("Corrupt stack pointer: expected %p, got %p.\n"
+             , expected_sp, inter_sp);
+#endif
+
+    return &apply_return_value;
+} /* sapply_lwob_int() */
+
+/*-------------------------------------------------------------------------*/
+svalue_t *
 sapply_int (string_t *fun, object_t *ob, int num_arg
            , Bool b_find_static, Bool b_use_default)
 
@@ -17614,7 +17870,8 @@ sapply_int (string_t *fun, object_t *ob, int num_arg
             inter_sp = _pop_n_elems(num_arg, inter_sp);
         return NULL;
     }
-    transfer_svalue(&apply_return_value, inter_sp);
+    free_svalue(&apply_return_value);
+    transfer_svalue_no_free(&apply_return_value, inter_sp);
     inter_sp--;
 
 #ifdef DEBUG
@@ -17788,6 +18045,47 @@ secure_apply_error ( svalue_t *save_sp, struct control_stack *save_csp
     num_error--;
 
 } /* secure_apply_error() */
+
+/*-------------------------------------------------------------------------*/
+svalue_t *
+secure_apply_lwob (string_t *fun, lwobject_t *lwob, int num_arg)
+
+/* Call function <fun> in the lightweight object <lwob> with <num_arg>
+ * arguments pushed onto the stack (<inter_sp> points to the last one).
+ * static and protected functions can't be called from the outside.
+ *
+ * secure_apply_lwob() returns a pointer to the function result when the call
+ * was successfull, or NULL on failure. The arguments are popped in any case.
+ * The result pointer, if returned, points to a static area which will be
+ * overwritten with the next secure_apply_lwob().
+ *
+ * Errors during the execution are caught (this is the big difference
+ * to sapply_lwob()) and cause secure_apply_lwob() to return NULL.
+ */
+
+{
+    struct error_recovery_info error_recovery_info;
+    svalue_t *save_sp;
+    struct control_stack *save_csp;
+    svalue_t *result;
+
+    error_recovery_info.rt.last = rt_context;
+    error_recovery_info.rt.type = ERROR_RECOVERY_APPLY;
+    rt_context = (rt_context_t *)&error_recovery_info.rt;
+    save_sp = inter_sp;
+    save_csp = csp;
+    if (setjmp(error_recovery_info.con.text))
+    {
+        secure_apply_error(save_sp - num_arg, save_csp, false);
+        result = NULL;
+    }
+    else
+    {
+        result = sapply_lwob(fun, lwob, num_arg);
+    }
+    rt_context = error_recovery_info.rt.last;
+    return result;
+} /* secure_apply_lwob() */
 
 /*-------------------------------------------------------------------------*/
 svalue_t *
@@ -18157,8 +18455,8 @@ assert_master_ob_loaded (void)
 
             /* Reactivate the old master */
             master_ob = ref_object(ob, "assert_master_ob_loaded");
-            if (current_object == &dummy_current_object_for_loads)
-                current_object = master_ob;
+            if (get_current_object() == &dummy_current_object_for_loads)
+                set_current_object(master_ob);
             push_number(inter_sp, newly_removed);
             sapply_int(STR_REACTIVATE, ob, 1, MY_TRUE, MY_FALSE);
             push_number(inter_sp, 2 - (newly_removed ? 1 : 0));
@@ -18179,9 +18477,9 @@ assert_master_ob_loaded (void)
          */
         master_ob = NULL;
         inside = MY_TRUE;
-        if (!current_object)
+        if (current_object.type == T_NUMBER)
         {
-            current_object = &dummy_current_object_for_loads;
+            set_current_object(&dummy_current_object_for_loads);
         }
 
         /* Free the driver hooks.
@@ -18194,12 +18492,12 @@ assert_master_ob_loaded (void)
         init_telopts();
 
         master_ob = get_object(master_name_str);
-        if (current_object == &dummy_current_object_for_loads)
+        if (get_current_object() == &dummy_current_object_for_loads)
         {
             /* This might be due to the above assignment, or to setting
              * it in the backend.
              */
-            current_object = master_ob;
+            set_current_object(master_ob);
         }
 
         initialize_master_uid();
@@ -18264,40 +18562,47 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
       {
         Bool      extra_frame;
 
-        /* Can't call from a destructed object */
-        if (l->ob->flags & O_DESTRUCTED)
+        if (l->ob.type == T_OBJECT)
         {
-            /* inter_sp == sp */
-            CLEAN_CSP
-            pop_n_elems(num_arg);
-            push_number(sp, 0);
-            inter_sp = sp;
-            return;
+            /* Can't call from a destructed object */
+            if (l->ob.u.ob->flags & O_DESTRUCTED)
+            {
+                /* inter_sp == sp */
+                CLEAN_CSP
+                pop_n_elems(num_arg);
+                push_number(sp, 0);
+                inter_sp = sp;
+                return;
+            }
+
+            /* Reference the bound and the originating object */
+            l->ob.u.ob->time_of_ref = current_time;
         }
 
-        /* Reference the bound and the originating object */
-        l->ob->time_of_ref = current_time;
-        l->function.lfun.ob->time_of_ref = current_time;
-        l->function.lfun.ob->flags &= ~O_RESET_STATE;
-
-        current_object = l->ob;
-
-        /* Can't call a function in a destructed object */
-        if (l->function.lfun.ob->flags & O_DESTRUCTED)
+        if (l->function.lfun.ob.type == T_OBJECT)
         {
-            /* inter_sp == sp */
-            CLEAN_CSP
-            pop_n_elems(num_arg);
-            push_number(sp, 0);
-            inter_sp = sp;
-            return;
+            l->function.lfun.ob.u.ob->time_of_ref = current_time;
+            l->function.lfun.ob.u.ob->flags &= ~O_RESET_STATE;
+
+            /* Can't call a function in a destructed object */
+            if (l->function.lfun.ob.u.ob->flags & O_DESTRUCTED)
+            {
+                /* inter_sp == sp */
+                CLEAN_CSP
+                pop_n_elems(num_arg);
+                push_number(sp, 0);
+                inter_sp = sp;
+                return;
+            }
         }
 
         /* Make the objects resident */
-        if ( (   current_object->flags & O_SWAPPED
-              && load_ob_from_swap(current_object) < 0)
-         ||  (   l->function.lfun.ob->flags & O_SWAPPED
-              && load_ob_from_swap(l->function.lfun.ob) < 0)
+        if ( (   current_object.type == T_OBJECT
+              && current_object.u.ob->flags & O_SWAPPED
+              && load_ob_from_swap(current_object.u.ob) < 0)
+         ||  (   l->function.lfun.ob.type == T_OBJECT
+              && l->function.lfun.ob.u.ob->flags & O_SWAPPED
+              && load_ob_from_swap(l->function.lfun.ob.u.ob) < 0)
            )
         {
             /* inter_sp == sp */
@@ -18307,23 +18612,15 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
             return;
         }
 
-#ifdef DEBUG
-        if (l->function.lfun.index >= l->function.lfun.ob->prog->num_functions)
-            fatal("Calling non-existing lfun closure #%hu in program '%s' "
-                  "with %hu functions.\n"
-                 , l->function.lfun.index
-                 , get_txt(l->function.lfun.ob->prog->name)
-                 , l->function.lfun.ob->prog->num_functions
-                );
-#endif
-          
+        current_object = l->ob;
+
         /* If the object creating the closure wasn't the one in which
          * it will be executed, we need to record the fact in a second
          * 'dummy' control frame. If we didn't, major security holes
          * open up.
          */
 
-        if (l->ob != l->function.lfun.ob)
+        if (!object_svalue_eq(l->ob, l->function.lfun.ob))
         {
             extra_frame = MY_TRUE;
             csp->extern_call = MY_TRUE;
@@ -18343,7 +18640,18 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
          */
         csp->extern_call = external;
         current_object = l->function.lfun.ob;
-        current_prog = current_object->prog;
+        current_prog = get_current_object_program();
+
+#ifdef DEBUG
+        if (l->function.lfun.index >= current_prog->num_functions)
+            fatal("Calling non-existing lfun closure #%hu in program '%s' "
+                  "with %hu functions.\n"
+                 , l->function.lfun.index
+                 , get_txt(current_prog->name)
+                 , current_prog->num_functions
+                );
+#endif
+
         /* inter_sp == sp */
         setup_new_frame(l->function.lfun.index, l->function.lfun.inhProg);
           
@@ -18373,28 +18681,32 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
     case CLOSURE_IDENTIFIER:  /* --- variable closure --- */
       {
         short i; /* the signed variant of lambda_t->function.index */
+        svalue_t *vars;
 
         CLEAN_CSP  /* no call will be done */
 
         /* Ignore any arguments passed to a variable closure. */
         pop_n_elems(num_arg);
 
-        /* Don't use variables in a destructed object */
-        if (l->ob->flags & O_DESTRUCTED)
+        if (l->ob.type == T_OBJECT)
         {
-            push_number(sp, 0);
-            inter_sp = sp;
-            return;
-        }
+            /* Don't use variables in a destructed object */
+            if (l->ob.u.ob->flags & O_DESTRUCTED)
+            {
+                push_number(sp, 0);
+                inter_sp = sp;
+                return;
+            }
 
-        /* Make the object resident */
-        if (   (l->ob->flags & O_SWAPPED)
-             && load_ob_from_swap(l->ob) < 0
-           )
-        {
-            errorf("Out of memory.\n");
-            /* NOTREACHED */
-            return;
+            /* Make the object resident */
+            if (   (l->ob.u.ob->flags & O_SWAPPED)
+                 && load_ob_from_swap(l->ob.u.ob) < 0
+               )
+            {
+                errorf("Out of memory.\n");
+                /* NOTREACHED */
+                return;
+            }
         }
 
         /* Do we have the variable? */
@@ -18405,24 +18717,32 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
             return;
         }
 
-        l->ob->time_of_ref = current_time;
+        if (l->ob.type == T_OBJECT)
+        {
+            l->ob.u.ob->time_of_ref = current_time;
+            vars = l->ob.u.ob->variables;
 #ifdef DEBUG
-        if (!l->ob->variables)
-            fatal("%s Fatal: call_lambda on variable for object %p '%s' "
-                  "w/o variables, index %d\n"
-                 , time_stamp(), l->ob, get_txt(l->ob->name), i);
+            if (!vars)
+                fatal("%s Fatal: call_lambda on variable for object %p '%s' "
+                      "w/o variables, index %d\n"
+                     , time_stamp(), l->ob.u.ob, get_txt(l->ob.u.ob->name), i);
 #endif
-        assign_svalue_no_free(++sp, &l->ob->variables[i]);
+        }
+        else
+        {
+            vars = l->ob.u.lwob->variables;
+#ifdef DEBUG
+            if (!vars)
+                fatal("%s Fatal: call_lambda on variable for lightweight object %p '/%s' "
+                      "w/o variables, index %d\n"
+                     , time_stamp(), l->ob.u.lwob, get_txt(l->ob.u.lwob->prog->name), i);
+#endif
+        }
+
+        assign_svalue_no_free(++sp, vars+i);
         inter_sp = sp;
         return;
       }
-
-    case CLOSURE_PRELIMINARY:
-        /* no valid current_object: fall out of the switch
-         * and let the error handling clean up the control
-         * stack.
-         */
-        break;
 
     case CLOSURE_BOUND_LAMBDA:  /* --- bound lambda closure --- */
       {
@@ -18454,37 +18774,40 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
       {
         bytecode_p funstart;
 
-        /* Can't call from a destructed object */
-        if (l->ob->flags & O_DESTRUCTED)
+        if (l->ob.type == T_OBJECT)
         {
-            /* inter_sp == sp */
-            CLEAN_CSP
-            pop_n_elems(num_arg);
-            push_number(sp, 0);
-            inter_sp = sp;
-            return;
+            /* Can't call from a destructed object */
+            if (l->ob.u.ob->flags & O_DESTRUCTED)
+            {
+                /* inter_sp == sp */
+                CLEAN_CSP
+                pop_n_elems(num_arg);
+                push_number(sp, 0);
+                inter_sp = sp;
+                return;
+            }
+
+            /* Make the object resident */
+            if (l->ob.u.ob->flags & O_SWAPPED
+             && load_ob_from_swap(l->ob.u.ob) < 0)
+            {
+                /* inter_sp == sp */
+                CLEAN_CSP
+                errorf("Out of memory\n");
+                /* NOTREACHED */
+                return;
+            }
+
+            /* Reference the object */
+            l->ob.u.ob->time_of_ref = current_time;
+            l->ob.u.ob->flags &= ~O_RESET_STATE;
         }
 
         current_object = l->ob;
 
-        /* Make the object resident */
-        if (current_object->flags & O_SWAPPED
-         && load_ob_from_swap(current_object) < 0)
-        {
-            /* inter_sp == sp */
-            CLEAN_CSP
-            errorf("Out of memory\n");
-            /* NOTREACHED */
-            return;
-        }
-
-        /* Reference the object */
-        current_object->time_of_ref = current_time;
-        current_object->flags &= ~O_RESET_STATE;
-
         /* Finish the setup */
 
-        current_prog = current_object->prog;
+        current_prog = get_current_object_program();
         current_lambda = *lsvp; addref_closure(lsvp, "call_lambda()");
         variable_index_offset = 0;
         function_index_offset = 0;
@@ -18493,7 +18816,7 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
         csp->extern_call = external;
         sp = setup_new_frame2(funstart, sp, MY_TRUE);
 
-        current_variables = current_object->variables;
+        current_variables = get_current_object_variables();
         current_strings = current_prog->strings;
         if (external)
             eval_instruction(inter_pc, sp);
@@ -18506,35 +18829,45 @@ int_call_lambda (svalue_t *lsvp, int num_arg, Bool external)
 
     default: /* --- efun-, simul efun-, operator closure */
       {
-        int i;  /* the closure type */
+        int i = lsvp->x.closure_type;  /* the closure type */
 
-        current_object = lsvp->u.ob;
-        /* Can't call from a destructed object */
-        if (current_object->flags & O_DESTRUCTED)
+        if (i < CLOSURE_LWO)
         {
-            /* inter_sp == sp */
-            CLEAN_CSP
-            pop_n_elems(num_arg);
-            push_number(sp, 0);
-            inter_sp = sp;
-            return;
+            i -= CLOSURE_LWO;
+            set_current_lwobject(lsvp->u.lwob);
+        }
+        else
+        {
+            object_t *ob = lsvp->u.ob;
+
+            /* Can't call from a destructed object */
+            if (ob->flags & O_DESTRUCTED)
+            {
+                /* inter_sp == sp */
+                CLEAN_CSP
+                pop_n_elems(num_arg);
+                push_number(sp, 0);
+                inter_sp = sp;
+                return;
+            }
+
+            /* Make the object resident */
+            if (ob->flags & O_SWAPPED
+             && load_ob_from_swap(ob) < 0)
+            {
+                /* inter_sp == sp */
+                CLEAN_CSP
+                errorf("Out of memory\n");
+                /* NOTREACHED */
+                return;
+            }
+
+            /* Reference the object */
+            ob->time_of_ref = current_time;
+
+            set_current_object(ob);
         }
 
-        /* Make the object resident */
-        if (current_object->flags & O_SWAPPED
-         && load_ob_from_swap(current_object) < 0)
-        {
-            /* inter_sp == sp */
-            CLEAN_CSP
-            errorf("Out of memory\n");
-            /* NOTREACHED */
-            return;
-        }
-
-        /* Reference the object */
-        current_object->time_of_ref = current_time;
-
-        i = lsvp->x.closure_type;
         if (i < CLOSURE_SIMUL_EFUN)
         {
             /* It's an operator or efun */
@@ -18833,7 +19166,7 @@ call_function (program_t *progp, int fx)
 
 /*-------------------------------------------------------------------------*/
 void
-call_function_args (object_t* ob, int fx, int num_arg)
+call_ob_function_args (object_t* ob, int fx, int num_arg)
 
 /* Call the function <fx> in object <ob> with <num_arg> arguments.
  * The return value will be left on the stack.
@@ -18856,7 +19189,7 @@ call_function_args (object_t* ob, int fx, int num_arg)
     csp->num_local_variables = num_arg;
 
     previous_ob = current_object;
-    current_object = ob;
+    set_current_object(ob);
     current_prog = ob->prog;
     setup_new_frame(fx, NULL);
 
@@ -18867,10 +19200,43 @@ call_function_args (object_t* ob, int fx, int num_arg)
     current_object = csp->ob;
     check_function_args(current_prog->function_headers[FUNCTION_HEADER_INDEX(csp->funstart)].offset.fx, current_prog, csp->funstart);
     previous_ob = current_object;
-    current_object = ob;
+    set_current_object(ob);
 
     eval_instruction(inter_pc, inter_sp);
-} /* call_function_args() */
+} /* call_ob_function_args() */
+
+/*-------------------------------------------------------------------------*/
+void
+call_lwob_function_args (lwobject_t* lwob, int fx, int num_arg)
+
+/* Call the function <fx> in object <ob> with <num_arg> arguments.
+ * The return value will be left on the stack.
+ *
+ * The function is called directly, no shadows will be considered.
+ */
+
+{
+    push_control_stack(inter_sp, inter_pc, inter_fp, inter_context);
+    csp->ob = current_object;
+    csp->prev_ob = previous_ob;
+    csp->num_local_variables = num_arg;
+
+    previous_ob = current_object;
+    set_current_lwobject(lwob);
+    current_prog = lwob->prog;
+    setup_new_frame(fx, NULL);
+
+    /* check_function_args might remove frames from the control stack without
+     * restoring the current_object.
+     */
+    previous_ob = csp->prev_ob;
+    current_object = csp->ob;
+    check_function_args(current_prog->function_headers[FUNCTION_HEADER_INDEX(csp->funstart)].offset.fx, current_prog, csp->funstart);
+    previous_ob = current_object;
+    set_current_lwobject(lwob);
+
+    eval_instruction(inter_pc, inter_sp);
+} /* call_lwob_function_args() */
 
 /*-------------------------------------------------------------------------*/
 int
@@ -19255,7 +19621,7 @@ collect_trace (strbuf_t * sbuf, vector_t ** rvec )
     int line = 0;
     string_t *name;           /* Uncounted ref to function name */
     string_t *file;           /* Counted ref to most recent file name */
-    object_t *ob = NULL;
+    svalue_t ob = const0;
     bytecode_p last_catch = NULL;  /* Last found catch */
 
     /* Temporary structure to hold the tracedata before it is condensed
@@ -19274,7 +19640,7 @@ collect_trace (strbuf_t * sbuf, vector_t ** rvec )
 #define PUT_EVAL_COST(var, cost)
 #endif
 
-#define NEW_ENTRY(var, type, progname, cost) \
+#define NEW_ENTRY(var, trtype, progname, cost) \
         struct traceentry * var; \
         var = alloca(sizeof(*var)); \
         if (!var) \
@@ -19288,9 +19654,12 @@ collect_trace (strbuf_t * sbuf, vector_t ** rvec )
             last_entry = var; \
         } \
         num_entries++; \
-        put_number(var->vec->item+TRACE_TYPE, type); \
+        put_number(var->vec->item+TRACE_TYPE, trtype); \
         put_ref_string(var->vec->item+TRACE_PROGRAM, progname); \
-        put_ref_string(entry->vec->item+TRACE_OBJECT, ob->name); \
+        if (ob.type == T_OBJECT) \
+            put_ref_string(entry->vec->item+TRACE_OBJECT, ob.u.ob->name); \
+        else \
+            put_number(entry->vec->item+TRACE_OBJECT, 0); \
 	PUT_EVAL_COST(var, cost)
 
 #define PUT_LOC(entry, val) \
@@ -19339,6 +19708,7 @@ collect_trace (strbuf_t * sbuf, vector_t ** rvec )
     do {
         bytecode_p  dump_pc;  /* the frame's pc */
         program_t  *prog;     /* the frame's program */
+        program_t  *obprog;   /* the object's program */
 #ifdef EVAL_COST_TRACE
         int32       dump_eval_cost; /* The eval cost at that frame. */
 #endif
@@ -19367,6 +19737,11 @@ collect_trace (strbuf_t * sbuf, vector_t ** rvec )
             }
             last_catch = NULL;
         }
+
+        if (ob.type == T_OBJECT)
+            obprog = ob.u.ob->prog;
+        else /* ob.type == T_LWOBJECT */
+            obprog = ob.u.lwob->prog;
 
         /* Retrieve pc and program from the stack */
         if (p == csp)
@@ -19427,7 +19802,6 @@ collect_trace (strbuf_t * sbuf, vector_t ** rvec )
         }
 
 not_catch:  /* The frame does not point at a catch here */
-
         /* Efun symbol? */
         if (!prog || !dump_pc)
         {
@@ -19436,16 +19810,19 @@ not_catch:  /* The frame does not point at a catch here */
              * TODO::But this handling might be changed, because it is not an efun symbol?
              */
             if (sbuf)
-#ifndef EVAL_COST_TRACE
-                strbuf_addf(sbuf, "<function symbol> in '%20s' ('%20s')\n"
-#else
-                strbuf_addf(sbuf, "%8d <function symbol> in '%20s' ('%20s')\n"
-                           , dump_eval_cost
+            {
+#ifdef EVAL_COST_TRACE
+                strbuf_addf(sbuf, "%8d ", dump_eval_cost);
 #endif
-                           , get_txt(ob->prog->name), get_txt(ob->name));
+                strbuf_addf(sbuf, "<function symbol> in '%20s'", get_txt(obprog->name));
+                if (ob.type == T_OBJECT)
+                    strbuf_addf(sbuf, " ('%20s')\n", get_txt(ob.u.ob->name));
+                else
+                    strbuf_addc(sbuf, '\n');
+            }
             if (rvec)
             {
-                NEW_ENTRY(entry, TRACE_TYPE_SYMBOL, ob->prog->name, dump_eval_cost);
+                NEW_ENTRY(entry, TRACE_TYPE_SYMBOL, obprog->name, dump_eval_cost);
             }
             continue;
         }
@@ -19454,17 +19831,19 @@ not_catch:  /* The frame does not point at a catch here */
         if (p[0].funstart == SIMUL_EFUN_FUNSTART)
         {
             if (sbuf)
-                strbuf_addf( sbuf
-#ifndef EVAL_COST_TRACE
-                           , "<simul_efun closure> bound to '%20s' ('%20s')\n"
-#else
-                           , "%8d <simul_efun closure> bound to '%20s' ('%20s')\n"
-                           , dump_eval_cost
+            {
+#ifdef EVAL_COST_TRACE
+                strbuf_addf(sbuf, "%8d ", dump_eval_cost);
 #endif
-                           , get_txt(ob->prog->name), get_txt(ob->name));
+                strbuf_addf(sbuf, "<simul_efun closure> bound to '%20s'", get_txt(obprog->name));
+                if (ob.type == T_OBJECT)
+                    strbuf_addf(sbuf, " ('%20s')\n", get_txt(ob.u.ob->name));
+                else
+                    strbuf_addc(sbuf, '\n');
+            }
             if (rvec)
             {
-                NEW_ENTRY(entry, TRACE_TYPE_SEFUN, ob->prog->name, dump_eval_cost);
+                NEW_ENTRY(entry, TRACE_TYPE_SEFUN, obprog->name, dump_eval_cost);
             }
             continue;
         }
@@ -19478,19 +19857,21 @@ not_catch:  /* The frame does not point at a catch here */
             if (iname)
             {
                 if (sbuf)
-#ifndef EVAL_COST_TRACE
-                    strbuf_addf(sbuf, "#\'%-14s for '%20s' ('%20s')\n"
-#else
-                    strbuf_addf(sbuf, "%8d #\'%-14s for '%20s' ('%20s')\n"
-                               , dump_eval_cost
+                {
+#ifdef EVAL_COST_TRACE
+                    strbuf_addf(sbuf, "%8d ", dump_eval_cost);
 #endif
-                               , iname, get_txt(ob->prog->name)
-                               , get_txt(ob->name));
+                    strbuf_addf(sbuf, "#\'%-14s for '%20s'", iname, get_txt(obprog->name));
+                    if (ob.type == T_OBJECT)
+                        strbuf_addf(sbuf, " ('%20s')\n", get_txt(ob.u.ob->name));
+                    else
+                        strbuf_addc(sbuf, '\n');
+                }
                 if (rvec)
                 {
                     string_t *tmp;
 
-                    NEW_ENTRY(entry, TRACE_TYPE_EFUN, ob->prog->name, dump_eval_cost);
+                    NEW_ENTRY(entry, TRACE_TYPE_EFUN, obprog->name, dump_eval_cost);
                     memsafe(tmp = new_mstring(iname, STRING_ASCII), strlen(iname)
                            , "instruction name");
                     put_string(entry->vec->item+TRACE_NAME, tmp);
@@ -19499,17 +19880,19 @@ not_catch:  /* The frame does not point at a catch here */
             else
             {
                 if (sbuf)
-#ifndef EVAL_COST_TRACE
-                    strbuf_addf( sbuf, "<efun closure %d> for '%20s' ('%20s')\n"
-#else
-                    strbuf_addf( sbuf, "%8d <efun closure %d> for '%20s' ('%20s')\n"
-                               , dump_eval_cost
+                {
+#ifdef EVAL_COST_TRACE
+                    strbuf_addf(sbuf, "%8d ", dump_eval_cost);
 #endif
-                               , p[0].instruction, get_txt(ob->prog->name)
-                               , get_txt(ob->name));
+                    strbuf_addf(sbuf, "<efun closure %d> for '%20s'", p[0].instruction, get_txt(obprog->name));
+                    if (ob.type == T_OBJECT)
+                        strbuf_addf(sbuf, " ('%20s')\n", get_txt(ob.u.ob->name));
+                    else
+                        strbuf_addc(sbuf, '\n');
+                }
                 if (rvec)
                 {
-                    NEW_ENTRY(entry, TRACE_TYPE_EFUN, ob->prog->name, dump_eval_cost);
+                    NEW_ENTRY(entry, TRACE_TYPE_EFUN, obprog->name, dump_eval_cost);
                     put_number(entry->vec->item+TRACE_NAME, p[0].instruction);
                 }
             }
@@ -19521,21 +19904,19 @@ not_catch:  /* The frame does not point at a catch here */
          || p[0].funstart > PROGRAM_END(*prog))
         {
             if (sbuf)
-                strbuf_addf( sbuf
-#ifndef EVAL_COST_TRACE
-                           , "<lambda 0x%6lx> in '%20s' ('%20s') offset %ld\n"
-#else
-                           , "%8d <lambda 0x%6lx> in '%20s' ('%20s') offset %ld\n"
-                           , dump_eval_cost
+            {
+#ifdef EVAL_COST_TRACE
+                strbuf_addf(sbuf, "%8d ", dump_eval_cost);
 #endif
-                           , (long)p[0].funstart
-                           , get_txt(ob->prog->name)
-                           , get_txt(ob->name)
-                           , (long)(dump_pc - p[0].funstart)
-                           );
+
+                strbuf_addf(sbuf, "<lambda 0x%6lx> in '%20s'", (long)p[0].funstart, get_txt(obprog->name));
+                if (ob.type == T_OBJECT)
+                    strbuf_addf(sbuf, " ('%20s')", get_txt(ob.u.ob->name));
+                strbuf_addf(sbuf, " offset %ld\n", (long)(dump_pc - p[0].funstart));
+            }
             if (rvec)
             {
-                NEW_ENTRY(entry, TRACE_TYPE_LAMBDA, ob->prog->name, dump_eval_cost);
+                NEW_ENTRY(entry, TRACE_TYPE_LAMBDA, obprog->name, dump_eval_cost);
                 put_number(entry->vec->item+TRACE_NAME, (p_int)p[0].funstart);
                 PUT_LOC(entry, (dump_pc - p[0].funstart));
             }
@@ -19553,27 +19934,28 @@ name_computed: /* Jump target from the catch detection */
         /* Print the name and line */
 
         if (mstreq(name, STR_HEART_BEAT) && p != csp)
-            ret = p->extern_call ? (p->ob ? p->ob->name : NULL) : ob->name;
+            ret = p->extern_call ? (p->ob.type == T_OBJECT ? p->ob.u.ob->name : NULL)
+                                 : (ob.type == T_OBJECT ? ob.u.ob->name : NULL);
 
         if (sbuf)
         {
+#ifdef EVAL_COST_TRACE
+            strbuf_addf(sbuf, "%8d ", dump_eval_cost);
+#endif
+            strbuf_addf(sbuf, "'%15s'", get_txt(name));
             if (file != NULL)
-#ifndef EVAL_COST_TRACE
-                strbuf_addf(sbuf, "'%15s' in '%20s' ('%20s') line %d\n"
-#else
-                strbuf_addf(sbuf, "%8d '%15s' in '%20s' ('%20s') line %d\n"
-                           , dump_eval_cost
-#endif
-                           , get_txt(name), get_txt(file)
-                           , get_txt(ob->name), line);
+                strbuf_addf(sbuf, " in '%20s'", get_txt(file));
+            else if (obprog)
+                strbuf_addf(sbuf, " in '%20s'", get_txt(obprog->name));
             else
-#ifndef EVAL_COST_TRACE
-                strbuf_addf(sbuf, "'%15s' in %22s ('%20s')\n"
-#else
-                strbuf_addf(sbuf, "%8d '%15s' in %22s ('%20s')\n"
-                           , dump_eval_cost
-#endif
-                           , get_txt(name), "", get_txt(ob->name));
+                strbuf_addf(sbuf, "     %20s ", "");
+
+            if (ob.type == T_OBJECT)
+                strbuf_addf(sbuf, " ('%20s')", get_txt(ob.u.ob->name));
+            if (file != NULL)
+                strbuf_addf(sbuf, " line %d\n", line);
+            else
+                strbuf_addc(sbuf, '\n');
         }
 
         if (rvec)
@@ -19726,22 +20108,20 @@ clear_interpreter_refs (void)
 
 {
 #ifdef TRACE_CODE
+    for (int i = TOTAL_TRACE_LENGTH; --i >= 0; )
     {
-        int i;
-
-        for (i = TOTAL_TRACE_LENGTH; --i >= 0; )
+        switch (previous_objects[i].type)
         {
-            object_t *ob;
+            case T_OBJECT:
+                clear_object_ref(previous_objects[i].u.ob);
+                break;
 
-            if (NULL != (ob = previous_objects[i])
-             && ob->flags & O_DESTRUCTED
-             && ob->ref
-               )
-            {
-                ob->ref = 0;
-                ob->prog->ref = 0;
-                clear_program_ref(ob->prog, MY_FALSE);
-            }
+            case T_LWOBJECT:
+                clear_lwobject_ref(previous_objects[i].u.lwob);
+                break;
+
+            default:
+                break;
         }
     }
 #endif
@@ -19764,20 +20144,30 @@ count_interpreter_refs (void)
 #ifdef TRACE_CODE
     for (i = TOTAL_TRACE_LENGTH; --i >= 0; )
     {
-        object_t *ob;
-
-        if ( NULL != (ob = previous_objects[i]) )
+        switch (previous_objects[i].type)
         {
-            if (ob->flags & O_DESTRUCTED)
+            case T_OBJECT:
             {
-                previous_objects[i] = NULL;
-                previous_instruction[i] = 0;
-                reference_destructed_object(ob);
+                object_t *ob = previous_objects[i].u.ob;
+                if (ob->flags & O_DESTRUCTED)
+                {
+                    previous_objects[i] = const0;
+                    previous_instruction[i] = 0;
+                    reference_destructed_object(ob);
+                }
+                else
+                {
+                    ob->ref++;
+                }
+                break;
             }
-            else
-            {
-                ob->ref++;
-            }
+
+            case T_LWOBJECT:
+                count_lwobject_ref(previous_objects[i].u.lwob);
+                break;
+
+            default:
+                break;
         }
     }
 #endif
@@ -19943,7 +20333,7 @@ program_referenced (program_t *prog, program_t *prog2)
 
 /*-------------------------------------------------------------------------*/
 static Bool
-program_exists (program_t *prog, object_t *guess)
+program_exists (program_t *prog, svalue_t guess)
 
 /* Test if <prog> exists - either by itself or as inherited program.
  * Start testing with the program of <guess>, if it is not there,
@@ -19953,16 +20343,29 @@ program_exists (program_t *prog, object_t *guess)
  */
 
 {
-    if (program_referenced(prog, guess->prog))
-        return MY_TRUE;
+    switch (guess.type)
+    {
+        case T_OBJECT:
+            if (program_referenced(prog, guess.u.ob->prog))
+                return MY_TRUE;
+            break;
 
-    for (guess = obj_list; guess; guess = guess->next_all)
+        case T_LWOBJECT:
+            if (program_referenced(prog, guess.u.lwob->prog))
+                return MY_TRUE;
+            break;
+
+        default:
+            break;
+    }
+
+    for (object_t *ob = obj_list; ob; ob = ob->next_all)
     {
 #ifdef DEBUG
-        if (guess->flags & O_DESTRUCTED)  /* TODO: Can't happen */
+        if (ob->flags & O_DESTRUCTED)  /* TODO: Can't happen */
             continue;
 #endif
-        if (program_referenced(prog, guess->prog))
+        if (program_referenced(prog, ob->prog))
             return MY_TRUE;
     }
 
@@ -19987,12 +20390,12 @@ last_instructions (int length, Bool verbose, svalue_t **svpp)
 
 {
     int i;
-    object_t *old_obj;
+    svalue_t old_obj;
     char buf[400];
     string_t *old_file;
     int old_line, line = 0;
 
-    old_obj = NULL;
+    old_obj = const0;
     old_file = NULL;
     old_line = 0;
     i = (last - length + TOTAL_TRACE_LENGTH) % TOTAL_TRACE_LENGTH;
@@ -20028,12 +20431,14 @@ last_instructions (int length, Bool verbose, svalue_t **svpp)
                     line = get_line_number(ppc, ppr, &file);
                 }
 
-                if (previous_objects[i] != old_obj
+                if (!object_svalue_eq(previous_objects[i], old_obj)
                  || (old_file && !mstreq(file, old_file))
                    )
                 {
                     snprintf(buf, sizeof(buf), "%.170s %.160s line %d"
-                               , get_txt(previous_objects[i]->name)
+                               , get_txt(previous_objects[i].type == T_OBJECT 
+                                       ? previous_objects[i].u.ob->name
+                                       : previous_objects[i].u.lwob->prog->name)
                                , get_txt(file), line
                     );
                     last_instr_output(buf, svpp);
@@ -20202,8 +20607,8 @@ f_caller_stack (svalue_t *sp)
 
 /* EFUN caller_stack()
  *
- *   object *caller_stack()
- *   object *caller_stack(int add_interactive)
+ *   <object|lwobject> *caller_stack()
+ *   <object|lwobject> *caller_stack(int add_interactive)
  *
  * Returns an array of the previous_object()s who caused the
  * call_other() to this_object().  previous_object(i) equals
@@ -20229,7 +20634,7 @@ f_caller_stack (svalue_t *sp)
     p = csp;
     for (i = 0, svp = v->item, done = MY_FALSE; i < depth; i++, svp++)
     {
-        object_t *prev;
+        svalue_t *prev;
         do {
             if (p == CONTROL_STACK)
             {
@@ -20244,15 +20649,15 @@ f_caller_stack (svalue_t *sp)
 
         /* Get 'the' calling object */
         if (p[1].extern_call & CS_PRETEND)
-            prev = p[1].pretend_to_be;
+            prev = &(p[1].pretend_to_be);
         else
-            prev = p[1].ob;
+            prev = &(p[1].ob);
 
         /* Enter it into the array */
-        if (prev == NULL || prev->flags & O_DESTRUCTED)
+        if (destructed_object_ref(prev))
             put_number(svp, 0);
         else
-            put_ref_object(svp, prev, "caller_stack");
+            assign_object_svalue_no_free(svp, *prev, "caller_stack");
     }
 
 #ifdef DEBUG
@@ -20289,7 +20694,7 @@ f_previous_object (svalue_t *sp)
 
 /* EFUN previous_object()
  *
- *   object previous_object(int i)
+ *   object|lwobject previous_object(int i)
  *
  * Follow back the last <i> call_other()s and return the calling
  * object (i.e. previous_object(2) returns the caller of the
@@ -20305,7 +20710,7 @@ f_previous_object (svalue_t *sp)
 {
     int i;
     struct control_stack *p;
-    object_t *prev_ob;
+    svalue_t *prev;
 
     /* Test the arguments */
     i = sp->u.number;
@@ -20327,14 +20732,14 @@ f_previous_object (svalue_t *sp)
 
     /* Determine the object and push it */
     if (p[1].extern_call & CS_PRETEND)
-        prev_ob = p[1].pretend_to_be;
+        prev = &(p[1].pretend_to_be);
     else
-        prev_ob = p[1].ob;
+        prev = &(p[1].ob);
 
-    if (!prev_ob || prev_ob->flags & O_DESTRUCTED)
+    if (destructed_object_ref(prev))
         sp->u.number = 0;
     else
-        put_ref_object(sp, prev_ob, "previous_object");
+        assign_object_svalue_no_free(sp, *prev, "previous_object");
 
     return sp;
 } /* f_previous_object() */
@@ -20508,7 +20913,7 @@ count_extra_ref_in_closure (lambda_t *l, ph_int type)
         }
         else if (type == CLOSURE_LFUN)
         {
-            count_extra_ref_in_object(l->function.lfun.ob);
+            count_extra_ref_in_vector(&(l->function.lfun.ob), 1);
             if (l->function.lfun.inhProg)
             {
                 l->function.lfun.inhProg->extra_ref++;
@@ -20519,7 +20924,7 @@ count_extra_ref_in_closure (lambda_t *l, ph_int type)
 
     if (type != CLOSURE_UNBOUND_LAMBDA)
     {
-        count_extra_ref_in_object(l->ob);
+        count_extra_ref_in_vector(&(l->ob), 1);
     }
     
     if (l->prog_ob)
@@ -20555,15 +20960,30 @@ count_extra_ref_in_vector (svalue_t *svp, size_t num)
                 if ( NULL == register_pointer(ptable, l) )
                     continue;
                 count_extra_ref_in_closure(l, p->x.closure_type);
-                continue;
             }
-            /* FALLTHROUGH */
+            else if (p->x.closure_type < CLOSURE_LWO)
+            {
+                if (NULL == register_pointer(ptable, p->u.lwob))
+                    continue;
+                count_extra_ref_in_vector(p->u.lwob->variables, p->u.lwob->prog->num_variables);
+            }
+            else
+            {
+                count_extra_ref_in_object(p->u.ob);
+            }
+            continue;
 
         case T_OBJECT:
-          {
             count_extra_ref_in_object(p->u.ob);
             continue;
-          }
+
+        case T_LWOBJECT:
+            if (NULL == register_pointer(ptable, p->u.lwob))
+                continue;
+            p->u.lwob->prog->extra_ref++;
+            count_extra_ref_in_prog(p->u.lwob->prog);
+            count_extra_ref_in_vector(p->u.lwob->variables, p->u.lwob->prog->num_variables);
+            continue;
 
         case T_QUOTED_ARRAY:
         case T_POINTER:
@@ -20609,6 +21029,12 @@ check_extra_ref_in_vector (svalue_t *svp, size_t num)
     {
         switch(p->type)
         {
+        case T_LWOBJECT:
+            if (NULL == register_pointer(ptable, p->u.lwob))
+                continue;
+            check_extra_ref_in_vector(p->u.lwob->variables, p->u.lwob->prog->num_variables);
+            continue;
+
         case T_QUOTED_ARRAY:
         case T_POINTER:
             if (NULL == register_pointer(ptable, p->u.vec) )
@@ -20717,17 +21143,7 @@ check_a_lot_ref_counts (program_t *search_prog)
 #endif
 
 #ifdef TRACE_CODE
-    {
-        int j;
-
-        for (j = TOTAL_TRACE_LENGTH; --j >= 0; )
-        {
-            if ( NULL != (ob = previous_objects[j]) )
-            {
-                count_extra_ref_in_object(ob);
-            }
-        }
-    }
+    count_extra_ref_in_vector(previous_objects, TOTAL_TRACE_LENGTH);
 #endif
 
     count_extra_ref_in_vector(&indexing_quickfix, 1);
@@ -21046,13 +21462,13 @@ v_apply (svalue_t *sp, int num_arg)
     /* No external calls may be done when this object is
      * destructed.
      */
-    if (current_object->flags & O_DESTRUCTED)
+    if (is_current_object_destructed())
     {
         sp = _pop_n_elems(num_arg, sp);
         push_number(sp, 0);
         inter_sp = sp;
         warnf("Call from destructed object '%s' ignored.\n"
-             , get_txt(current_object->name));
+             , get_txt(current_object.u.ob->name));
         return sp;
     }
 
@@ -21093,12 +21509,13 @@ v_funcall (svalue_t *sp, int num_arg)
         /* No external calls may be done when this object is
          * destructed.
          */
-        if (current_object->flags & O_DESTRUCTED) {
+        if (is_current_object_destructed())
+        {
             sp = _pop_n_elems(num_arg, sp);
             push_number(sp, 0);
             inter_sp = sp;
             warnf("Call from destructed object '%s' ignored.\n"
-                 , get_txt(current_object->name));
+                 , get_txt(current_object.u.ob->name));
             return sp;
         }
 
@@ -21131,12 +21548,12 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
  *      call_resolved(), call_direct_resolved(),
  *      call_strict(), call_direct_strict()
  *
- *   unknown call_other(object|object* ob, string fun, mixed arg, ...)
- *   unknown call_direct(object|object* ob, string fun, mixed arg, ...)
- *   int|int* call_resolved(mixed & result, object|object* ob, string func, ...)
- *   int|int* call_direct_resolved(mixed & result, object|object* ob, string func, ...)
- *   unknown call_strict(object|object* ob, string func, ...)
- *   unknown call_direct_strict(object|object* ob, string func, ...)
+ *   unknown call_other(object|object*|lwobject|lwobject* ob, string fun, mixed arg, ...)
+ *   unknown call_direct(object|object*|lwobject|lwobject* ob, string fun, mixed arg, ...)
+ *   int|int* call_resolved(mixed & result, object|object*|lwobject|lwobject* ob, string func, ...)
+ *   int|int* call_direct_resolved(mixed & result, object|object*|lwobject|lwobject* ob, string func, ...)
+ *   unknown call_strict(object|object*|lwobject|lwobject* ob, string func, ...)
+ *   unknown call_direct_strict(object|object*|lwobject|lwobject* ob, string func, ...)
  *
  * Implementation of calls to other functions. If ob->func() is defined and
  * publicly accessible, any of the optional extra arguments are passed to
@@ -21147,6 +21564,7 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
  * If the current object is already destructed, or the ob does not
  * exist, or ob does not define a public accessible function named
  * func, then the default method will be executed if b_use_default is true.
+ * The default function will not be called for lightweight objects.
  * If b_use_default is false or the default method is not successful,
  * the handling is defined by error_handling. For CO_IGNORE and CO_RESULT
  * 0 is returned, CO_ERROR will raise an error in this case. In a successful
@@ -21163,7 +21581,9 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
 
 {
     svalue_t *arg;
-    object_t *ob;
+    object_t *ob = NULL;
+    lwobject_t *lwob = NULL;
+    string_t *obname;
     int rc, call_num_arg;
 
     arg = sp - num_arg + 1;
@@ -21184,7 +21604,7 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
     /* No external calls may be done when this object is
      * destructed.
      */
-    if (current_object->flags & O_DESTRUCTED)
+    if (is_current_object_destructed())
     {
         if (error_handling == CO_ERROR)
             errorf("%s() from destructed object.\n", efunname);
@@ -21193,7 +21613,7 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
         push_number(sp, 0);
         inter_sp = sp;
         warnf("Call from destructed object '%s' ignored.\n"
-             , get_txt(current_object->name));
+             , get_txt(current_object.u.ob->name));
         return sp;
     }
 
@@ -21214,6 +21634,8 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
         }
         else if (arg[0].type == T_OBJECT)
             ob = arg[0].u.ob;
+        else if (arg[0].type == T_LWOBJECT)
+            lwob = arg[0].u.lwob;
         else /* it's a string */
         {
             ob = get_object(arg[0].u.str);
@@ -21236,17 +21658,26 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
 
         /* Send the remaining arguments to the function.
          */
-        if (ob == master_ob)
-            b_use_default = MY_FALSE;
-        rc = int_apply(arg[1].u.str, ob, call_num_arg, MY_FALSE, b_use_default);
+        if (lwob)
+        {
+            rc = apply_lwob(arg[1].u.str, lwob, call_num_arg, MY_FALSE, NULL) ? APPLY_FOUND : APPLY_NOT_FOUND;
+            obname = lwob->prog->name;
+        }
+        else
+        {
+            if (ob == master_ob)
+                b_use_default = MY_FALSE;
+            rc = int_apply(arg[1].u.str, ob, call_num_arg, MY_FALSE, b_use_default);
+            obname = ob->name;
+        }
         if (rc == APPLY_NOT_FOUND)
         {
             /* Function not found */
             if (error_handling == CO_ERROR)
             {
-                errorf("Function %.50s() not found in %s.\n"
+                errorf("Function %.50s() not found in /%s.\n"
                      , get_txt(arg[1].u.str)
-                     , get_txt(ob->name));
+                     , get_txt(obname));
             }
 
             if (b_use_default)
@@ -21334,18 +21765,48 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
         svp = arg->u.vec->item;
         for ( ; size != 0; size--, svp++, rcp++)
         {
+            svalue_t *item;
             int i;
-            bool use_default_for_ob;
-
-            svalue_t * item = get_rvalue(svp, NULL);
-            if(!item)
-                item = svp;
 
             assign_eval_cost_inl();
             inter_sp = sp; /* Might be clobbered from previous loop */
 
+            if (is_current_object_destructed())
+            {
+                if (error_handling == CO_ERROR)
+                    errorf("%s() from destructed object.\n", efunname);
+
+                /* Fill the remaining values with 0 and break. */
+                for ( ; size != 0; size--, svp++, rcp++)
+                {
+                    item = get_rvalue(svp, NULL);
+                    if (!item)
+                        item = svp;
+
+                    free_svalue(item);
+                    put_number(item, 0);
+
+                    free_svalue(svp);
+                    put_number(svp, 0);
+                    put_number(rcp, 0);
+                }
+
+                warnf("Call from destructed object '%s' ignored.\n"
+                     , get_txt(current_object.u.ob->name));
+                break;
+            }
+
+            item = get_rvalue(svp, NULL);
+            if(!item)
+                item = svp;
+
+            ob = NULL;
+            lwob = NULL;
+
             if (item->type == T_OBJECT)
                 ob = item->u.ob;
+            else if (item->type == T_LWOBJECT)
+                lwob = item->u.lwob;
             else if (item->type == T_STRING)
             {
                 ob = get_object(item->u.str);
@@ -21373,13 +21834,13 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
             }
             else
                 errorf("Bad arg for %s() at index %"PRIdMPINT": "
-                       "got %s, expected string/object\n"
+                       "got %s, expected string/object/lwobject\n"
                       , efunname
                       , (mp_int)(svp - arg->u.vec->item)
                       , typename(item->type));
 
             /* Destructed objects yield 0 */
-            if (ob->flags & O_DESTRUCTED)
+            if (ob && (ob->flags & O_DESTRUCTED))
             {
                 if (error_handling == CO_ERROR)
                     errorf("%s() to destructed object at index %"PRIdMPINT".\n"
@@ -21415,24 +21876,33 @@ int_call_other (bool b_use_default, enum call_other_error_handling error_handlin
             /* Call the function with the remaining args on the stack.
              */
             inter_sp = sp; /* update to new setting */
-            use_default_for_ob = b_use_default && (ob != master_ob);
-            rc = int_apply(arg[1].u.str, ob, call_num_arg, MY_FALSE, use_default_for_ob);
+            if (lwob)
+            {
+                rc = apply_lwob(arg[1].u.str, lwob, call_num_arg, MY_FALSE, NULL) ? APPLY_FOUND : APPLY_NOT_FOUND;
+                obname = lwob->prog->name;
+            }
+            else
+            {
+                bool use_default_for_ob = b_use_default && (ob != master_ob);
+                rc = int_apply(arg[1].u.str, ob, call_num_arg, MY_FALSE, use_default_for_ob);
+                obname = ob->name;
+
+                /* In this case int_apply() will leave the arguments. */
+                if (!use_default_for_ob && rc == APPLY_NOT_FOUND)
+                    _pop_n_elems(call_num_arg, sp);
+            }
             if (rc == APPLY_NOT_FOUND)
             {
                 /* Function not found. */
                 if (error_handling == CO_ERROR)
                 {
-                    errorf("Function %.50s() not found in %s.\n"
+                    errorf("Function %.50s() not found in /%s.\n"
                          , get_txt(arg[1].u.str)
-                         , get_txt(ob->name));
+                         , get_txt(obname));
                 }
 
                 /* Assign 0 as result. */
-                if (use_default_for_ob) /* int_apply() removed the args */
-                    sp -= call_num_arg;
-                else
-                    sp = _pop_n_elems(call_num_arg, sp);
-
+                sp -= call_num_arg; /* int_apply() removed the args */
                 free_svalue(svp);
                 put_number(svp, 0);
                 put_number(rcp, 0);
@@ -21617,7 +22087,7 @@ f_set_this_object (svalue_t *sp)
 
 {
 
-    if (sp->u.ob != current_object)
+    if (!is_current_object(*sp))
     {
         if ((master_ob != NULL && current_variables == master_ob->variables)
          || (simul_efun_object != NULL && current_variables == simul_efun_object->variables)
@@ -21630,8 +22100,9 @@ f_set_this_object (svalue_t *sp)
              */
             for (p = csp; !p->extern_call; p--) NOOP;
 
+            current_object = *sp;
             p->extern_call |= CS_PRETEND;
-            p->pretend_to_be = current_object = sp->u.ob;
+            assign_current_object(&(p->pretend_to_be), "set_this_object");
         }
     }
 

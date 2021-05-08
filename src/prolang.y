@@ -82,6 +82,7 @@
 
 #include "prolang.h"
 
+#include "applied_decl.h"
 #include "array.h"
 #include "backend.h"
 #include "closure.h"
@@ -180,9 +181,11 @@ short hook_type_map[NUM_DRIVER_HOOKS] =
     H_MOVE_OBJECT1: 0, \
     H_LOAD_UIDS:      SH(T_CLOSURE), \
     H_CLONE_UIDS:     SH(T_CLOSURE), \
+    H_LWOBJECT_UIDS:  SH(T_CLOSURE), \
     H_CREATE_SUPER:                 SH(T_STRING), \
     H_CREATE_OB:                    SH(T_STRING), \
     H_CREATE_CLONE:                 SH(T_STRING), \
+    H_CREATE_LWOBJECT:              SH(T_STRING), \
     H_RESET:                        SH(T_STRING), \
     H_CLEAN_UP:       SH(T_CLOSURE) SH(T_STRING), \
     H_MODIFY_COMMAND: SH(T_CLOSURE) SH(T_STRING) SH(T_MAPPING), \
@@ -1090,6 +1093,14 @@ static int simple_includes;
   /* Number of simple includes since the last real one.
    */
 
+static int num_lwo_calls;
+  /* Number of needed entries in the lightweight object call cache.
+   */
+
+static bool uses_non_lightweight_efuns;
+  /* The program calls efuns that are not suitable for lightweight objects.
+   */
+
 static p_uint last_include_start;
   /* Address in A_LINENUMBERS of the last include information.
    * It is used to remove information about includes which do
@@ -1111,7 +1122,12 @@ static const char * compiled_file;
 lpctype_t _lpctype_unknown_array, _lpctype_any_array,    _lpctype_int_float,
           _lpctype_int_array,     _lpctype_string_array, _lpctype_object_array,
           _lpctype_bytes_array,   _lpctype_string_bytes, _lpctype_string_or_bytes_array,
-          _lpctype_string_object, _lpctype_string_object_array;
+          _lpctype_string_object, _lpctype_string_object_array,
+          _lpctype_lwobject_array,_lpctype_any_object_or_lwobject,
+          _lpctype_any_object_or_lwobject_array,
+          _lpctype_any_object_or_lwobject_array_array,
+          _lpctype_int_or_string, _lpctype_string_or_string_array,
+          _lpctype_catch_msg_arg;
 lpctype_t *lpctype_unknown_array = &_lpctype_unknown_array,
           *lpctype_any_array     = &_lpctype_any_array,
           *lpctype_int_float     = &_lpctype_int_float,
@@ -1122,7 +1138,14 @@ lpctype_t *lpctype_unknown_array = &_lpctype_unknown_array,
           *lpctype_string_bytes  = &_lpctype_string_bytes,
           *lpctype_string_or_bytes_array = &_lpctype_string_or_bytes_array,
           *lpctype_string_object = &_lpctype_string_object,
-          *lpctype_string_object_array = &_lpctype_string_object_array;
+          *lpctype_string_object_array = &_lpctype_string_object_array,
+          *lpctype_lwobject_array= &_lpctype_lwobject_array,
+          *lpctype_any_object_or_lwobject = &_lpctype_any_object_or_lwobject,
+          *lpctype_any_object_or_lwobject_array = &_lpctype_any_object_or_lwobject_array,
+          *lpctype_any_object_or_lwobject_array_array = &_lpctype_any_object_or_lwobject_array_array,
+          *lpctype_int_or_string = &_lpctype_int_or_string,
+          *lpctype_string_or_string_array = &_lpctype_string_or_string_array,
+          *lpctype_catch_msg_arg = &_lpctype_catch_msg_arg;
 
 
 /*-------------------------------------------------------------------------*/
@@ -1568,8 +1591,8 @@ get_lpctype_name_buf (lpctype_t *type, char *buf, size_t bufsize)
  */
 {
     static char *type_name[] = { "unknown", "int", "string", "void",
-                                 "object", "mapping", "float", "mixed",
-                                 "closure", "symbol", "quoted_array", "bytes" };
+                                 "mapping", "float", "mixed", "closure",
+                                 "symbol", "quoted_array", "bytes" };
 
     if (bufsize <= 0)
         return 0;
@@ -1628,6 +1651,41 @@ get_lpctype_name_buf (lpctype_t *type, char *buf, size_t bufsize)
                 return strlen(buf);
             }
 
+        }
+
+    case TCLASS_OBJECT:
+        {
+            const char* obtypename = (type->t_object.type == OBJECT_REGULAR) ? "object" : "lwobject";
+            size_t obtypenamelen = strlen(obtypename);
+
+            if (type->t_object.program_name)
+            {
+                size_t proglen =  mstrsize(type->t_object.program_name);
+                size_t len = proglen + obtypenamelen + 4;
+                if (len < bufsize)
+                {
+                    char *bufptr = buf + obtypenamelen;
+
+                    memcpy(buf, obtypename, obtypenamelen);
+                    memcpy(bufptr, " \"/", 3);
+                    bufptr += 3;
+
+                    memcpy(bufptr, get_txt(type->t_object.program_name), proglen);
+                    buf[len-1] = '"';
+                    buf[len] = 0;
+                    return len;
+                }
+                else
+                {
+                    buf[0] = '\0';
+                    return 0;
+                }
+            }
+            else // any object
+            {
+                snprintf(buf, bufsize, "%s", obtypename);
+                return strlen(buf);
+            }
         }
 
     case TCLASS_ARRAY:
@@ -7404,6 +7462,7 @@ delete_prog_string (void)
 %token L_LE
 %token L_LOR
 %token L_LSH
+%token L_LWOBJECT
 %token L_MAPPING
 %token L_MIXED
 %token L_NE
@@ -7928,6 +7987,104 @@ def:  type L_IDENTIFIER  /* Function definition or prototype */
           $<number>$ = reserve_default_value_block(num_opt, offset);
           if (!$<number>$)
               $5.num_opt = 0;
+
+          /* Check whether this is an applied lfun. */
+          while (pragma_warn_applied_functions)
+          {
+              int hash = mstring_get_hash(def_function_ident->name) & applied_decl_hash_table_mask;
+
+              applied_decl_t** entry;
+              for (entry = applied_decl_hash_table + hash; *entry != NULL; entry = &((*entry)->next))
+              {
+                  if ((*entry)->name == def_function_ident->name) /* Both are tabled. */
+                      break;
+              }
+
+              if (*entry != NULL)
+              {
+                  applied_decl_t *decl = *entry;
+                  lpctype_t **exptype;
+
+                  if (def_function_returntype.t_type == NULL)
+                  {
+                      yywarnf("\"#pragma warn_applied_functions\" requires type for applied lfun '%s'"
+                              , get_txt(decl->name));
+                      break;
+                  }
+
+                  /* Check 1: Visibility */
+                  if ((def_function_returntype.t_flags & decl->visibility) != 0)
+                    yywarnf("Insufficient visibility for applied lfun '%s': '%s' is required"
+                           , get_txt(decl->name), decl->vis_name);
+
+                  /* Check 2: Return type */
+                  if (!has_common_type(def_function_returntype.t_type, decl->returntype)
+                   && (!decl->void_allowed || def_function_returntype.t_type != lpctype_void))
+                  {
+                      yywarnf("Wrong returntype for applied lfun '%s': %s"
+                            , get_txt(decl->name), get_two_lpctypes($1.t_type, decl->returntype));
+                  }
+
+                  /* Check 3: The number of arguments */
+                  if (!decl->varargs && !(def_function_returntype.t_flags & TYPE_MOD_VARARGS))
+                  {
+                      int min_arg = $5.num - $5.num_opt;
+                      int max_arg = $5.num;
+
+                      if (def_function_returntype.t_flags & TYPE_MOD_XVARARGS)
+                      {
+                          min_arg--;
+                          max_arg = INT_MAX;
+                      }
+
+                      if (min_arg > decl->num_arg && !decl->xvarargs)
+                          yywarnf("Too many arguments for applied lfun '%s': Expected %d"
+                                 , get_txt(decl->name), decl->num_arg);
+                      else if (max_arg < decl->num_arg)
+                          yywarnf("Too few arguments for applied lfun '%s': Expected %d"
+                                 , get_txt(decl->name), decl->num_arg);
+                  }
+
+                  /* Check 4: Check the actual argument types. */
+                  exptype = applied_decl_args + decl->arg_index;
+                  for (int i = 0, j = 0; i < decl->num_arg && j < $5.num; i++, j++)
+                  {
+                      lpctype_t *arg = local_variables[j].type.t_type;
+
+                      if (j == $5.num - 1 && (def_function_returntype.t_flags & TYPE_MOD_XVARARGS))
+                      {
+                          lpctype_t *elem_type = exptype[i++], *arr_type;
+
+                          /* We'll collect the remaining arguments here. */
+                          for (; i < decl->num_arg; i++)
+                          {
+                              lpctype_t *temp = get_union_type(elem_type, exptype[i]);
+                              free_lpctype(elem_type);
+                              elem_type = temp;
+                          }
+
+                          arr_type = get_array_type(elem_type);
+
+                          if (!has_common_type(arg, arr_type))
+                              yywarnf("Wrong argument %d type for applied lfun '%s': %s"
+                                     , j+1, get_txt(decl->name)
+                                     , get_two_lpctypes(arg, arr_type));
+
+                          free_lpctype(elem_type);
+                          free_lpctype(arr_type);
+                          break;
+                      }
+                      else if (!has_common_type(arg, exptype[i]))
+                          yywarnf("Wrong argument %d type for applied lfun '%s': %s"
+                                 , j+1, get_txt(decl->name)
+                                 , get_two_lpctypes(arg, *exptype));
+                  }
+
+                  /* Remove it from the table, so we won't check again. */
+                  *entry = (*entry)->next;
+              }
+              break;
+          }
       }
 
       function_body
@@ -8874,12 +9031,25 @@ single_basic_non_void_type:
     | L_INT          { $$ = lpctype_int;        }
     | L_BYTES_DECL   { $$ = lpctype_bytes;      }
     | L_STRING_DECL  { $$ = pragma_no_bytes_type ? lpctype_string_bytes : lpctype_string; }
-    | L_OBJECT       { $$ = lpctype_object;     }
     | L_CLOSURE_DECL { $$ = lpctype_closure;    }
     | L_SYMBOL_DECL  { $$ = lpctype_symbol;     }
     | L_FLOAT_DECL   { $$ = lpctype_float;      }
     | L_MAPPING      { $$ = lpctype_mapping;    }
     | L_MIXED        { $$ = lpctype_mixed;      }
+    | L_OBJECT       { $$ = lpctype_any_object; }
+    | L_OBJECT simple_string_constant
+      {
+          $$ = get_object_type(last_string_constant);
+          free_mstring(last_string_constant);
+          last_string_constant = NULL;
+      }
+    | L_LWOBJECT     { $$ = lpctype_any_lwobject; }
+    | L_LWOBJECT simple_string_constant
+      {
+          $$ = get_lwobject_type(last_string_constant);
+          free_mstring(last_string_constant);
+          last_string_constant = NULL;
+      }
     | L_STRUCT identifier
       {
           int num;
@@ -10990,6 +11160,29 @@ constant:
 ; /* constant */
 
 
+/* The simple_string_constant is similar to string_constant, but
+ * forbids the use of paranthesis to avoid shift/reduce conflicts,
+ * for example between
+ *    function object ("/i/room") () {}
+ *    function object             () {}
+ */
+simple_string_constant:
+      L_STRING
+      {
+          last_string_constant = last_lex_string;
+          last_lex_string = NULL;
+      }
+    | simple_string_constant '+' L_STRING
+      {
+          add_string_constant();
+      }
+    | L_STRING L_STRING
+      { fatal("L_STRING LSTRING: presence of rule should prevent its reduction\n"); }
+    | simple_string_constant '+' L_STRING L_STRING
+      { fatal("L_STRING LSTRING: presence of rule should prevent its reduction\n"); }
+; /* simple_string_constant */
+
+
 string_constant:
       L_STRING
       {
@@ -12096,7 +12289,7 @@ expr0:
           {
               ins_f_code(F_TO_STRING);
           }
-          else if($1 == lpctype_object)
+          else if($1 == lpctype_any_object)
           {
               ins_f_code(F_TO_OBJECT);
           }
@@ -12562,6 +12755,25 @@ expr4:
                   GLOBAL_VARIABLE(varidx).usage = VAR_USAGE_READWRITE;
               }
           }
+          else if (ix >= CLOSURE_EFUN_OFFS && ix < CLOSURE_SIMUL_EFUN_OFFS)
+          {
+              /* Warn for lightweight objects */
+              if (instrs[ix - CLOSURE_EFUN_OFFS].no_lightweight)
+              {
+                  uses_non_lightweight_efuns = true;
+                  if (!pragma_no_lightweight && pragma_warn_lightweight)
+                      yywarnf("#'%s cannot be called from lightweight objects"
+                             , instrs[ix - CLOSURE_EFUN_OFFS].name);
+
+              }
+
+              /* Warn if the efun is deprecated */
+              if (pragma_warn_deprecated && instrs[ix - CLOSURE_EFUN_OFFS].deprecated != NULL)
+                  yywarnf("#'%s is deprecated: %s"
+                        , instrs[ix - CLOSURE_EFUN_OFFS].name
+                        , instrs[ix - CLOSURE_EFUN_OFFS].deprecated);
+          }
+
           ins_f_code(F_CLOSURE);
           ins_short(ix);
           ins_short(inhIndex);
@@ -14563,6 +14775,15 @@ function_call:
                   $$.type = get_fulltype(ref_lpctype(instrs[f].ret_type));
                   argp = &efun_arg_types[instrs[f].arg_index];
 
+                  /* Warn for lightweight objects */
+                  if (instrs[f].no_lightweight)
+                  {
+                      uses_non_lightweight_efuns = true;
+                      if (!pragma_no_lightweight && pragma_warn_lightweight)
+                          yywarnf("%s() cannot be called from lightweight objects"
+                                 , instrs[f].name);
+                  }
+
                   /* Warn if the efun is deprecated */
                   if (pragma_warn_deprecated && instrs[f].deprecated != NULL)
                       yywarnf("%s() is deprecated: %s"
@@ -14996,8 +15217,26 @@ function_call:
           else /* true call_other */
           {
               int call_instr = $2.strict_member ? F_CALL_STRICT : F_CALL_OTHER;
-              add_f_code(call_instr);
-              CURRENT_PROGRAM_SIZE++;
+
+              if ($1.type.t_type->t_class == TCLASS_OBJECT
+               && $1.type.t_type->t_object.type == OBJECT_LIGHTWEIGHT
+               && $3
+               && num_lwo_calls <= USHRT_MAX)
+              {
+                  /* Call to a single lightweight object with a constant function name
+                   * and we have space in the call cache, then we use the cached call
+                   * instruction here.
+                   */
+                  add_f_code($2.strict_member ? F_CALL_STRICT_CACHED : F_CALL_OTHER_CACHED);
+                  add_short(num_lwo_calls);
+                  CURRENT_PROGRAM_SIZE += 3;
+                  num_lwo_calls++;
+              }
+              else
+              {
+                  add_f_code(call_instr);
+                  CURRENT_PROGRAM_SIZE++;
+              }
               $$.type = get_fulltype(instrs[call_instr].ret_type);
 
               if (!check_unknown_type($1.type.t_type)
@@ -15972,7 +16211,7 @@ adjust_virtually_inherited ( unsigned short *pFX, inherit_t **pIP)
             fx -= ip2->function_index_offset;
 
             /* Is there an update for this program? */
-            while (ip->inherit_type & INHERIT_TYPE_MAPPED)
+            while (ip->inherit_mapped)
             {
                 fx = GET_BLOCK(A_UPDATE_INDEX_MAP)[fx + ip->function_map_offset];
                 if (fx == USHRT_MAX)
@@ -16058,7 +16297,7 @@ lookup_inherited (const char *super_name, string_t *real_name
         unsigned short found_ix;
         short i;
 
-        if (ip->inherit_type & INHERIT_TYPE_MAPPED)
+        if (ip->inherit_mapped)
             /* this is an old inherit */
             continue;
 
@@ -16310,7 +16549,7 @@ insert_inherited (char *super_name, string_t *real_name
             if ( !match_string(super_name, get_txt(ip->prog->name), l) )
                 continue;
 
-            if (ip->inherit_type & INHERIT_TYPE_DUPLICATE)
+            if (ip->inherit_duplicate)
             {
                 /* This is a duplicate inherit, let's search for the original. */
                 for (ip = &(INHERIT(0)); ip < ip0; ip++)
@@ -16337,7 +16576,7 @@ insert_inherited (char *super_name, string_t *real_name
             /* The (new) ip might be duplicate inherit, or point to
              * a virtually inherited function we called already.
              */
-            if ((ip->inherit_type & INHERIT_TYPE_DUPLICATE)
+            if (ip->inherit_duplicate
              || was_called[ip_index])
                 /* duplicate inherit */
                 continue;
@@ -16960,12 +17199,12 @@ update_virtual_program (program_t *from, inherit_t *oldinheritp, inherit_t *newi
     updateinherit.inherit_depth = oldinheritp->inherit_depth;
 
     if (update_existing)
-        newinheritp->inherit_type |= INHERIT_TYPE_DUPLICATE;
+        newinheritp->inherit_duplicate = true;
     else
-        updateinherit.inherit_type |= INHERIT_TYPE_DUPLICATE;
+        updateinherit.inherit_duplicate = true;
 
     oldinheritp->updated_inherit = INHERIT_COUNT;
-    oldinheritp->inherit_type |= INHERIT_TYPE_MAPPED;
+    oldinheritp->inherit_mapped = true;
     oldinheritp->num_additional_variables = 0;
     oldinheritp->variable_map_offset = UPDATE_INDEX_MAP_COUNT;
     oldinheritp->function_map_offset = UPDATE_INDEX_MAP_COUNT + num_old_variables;
@@ -17109,10 +17348,10 @@ update_virtual_program (program_t *from, inherit_t *oldinheritp, inherit_t *newi
 
         for (inherit_t* inh = oldinheritp + 1; inh < last_inherit; inh++)
         {
-            if(inh->variable_index_offset & NON_VIRTUAL_OFFSET_TAG)
+            if (inh->variable_index_offset & NON_VIRTUAL_OFFSET_TAG)
                 continue;
 
-            if(inh->inherit_type & (INHERIT_TYPE_DUPLICATE))
+            if (inh->inherit_duplicate)
                 continue;
 
             inh->variable_index_offset -= diff;
@@ -17309,14 +17548,14 @@ update_virtual_program (program_t *from, inherit_t *oldinheritp, inherit_t *newi
                 inherit_t dupupdate;
 
                 /* If this is a virtual inherit, it must be a duplicate. */
-                assert((dupinheritp->inherit_type & (INHERIT_TYPE_DUPLICATE|INHERIT_TYPE_MAPPED)) == INHERIT_TYPE_DUPLICATE);
+                assert(dupinheritp->inherit_duplicate && !dupinheritp->inherit_mapped);
 
                 dupupdate = updateinherit;
-                dupupdate.inherit_type |= INHERIT_TYPE_DUPLICATE;
+                dupupdate.inherit_duplicate = true;
                 dupupdate.inherit_depth = dupinheritp->inherit_depth;
                 dupupdate.function_index_offset = FUNCTION_COUNT;
 
-                dupinheritp->inherit_type |= INHERIT_TYPE_MAPPED;
+                dupinheritp->inherit_mapped = true;
                 dupinheritp->updated_inherit = INHERIT_COUNT;
                 dupinheritp->variable_index_offset = oldinheritp->variable_index_offset;
                 dupinheritp->num_additional_variables = oldinheritp->num_additional_variables;
@@ -17356,7 +17595,8 @@ copy_updated_inherit (inherit_t *oldinheritp, inherit_t *newinheritp, program_t 
     /* We need to duplate the update inherit entry. */
     inherit_t inheritupdate = INHERIT(oldinheritp->updated_inherit);
 
-    newinheritp->inherit_type |= INHERIT_TYPE_DUPLICATE|INHERIT_TYPE_MAPPED;
+    newinheritp->inherit_duplicate = true;
+    newinheritp->inherit_mapped = true;
     newinheritp->variable_index_offset = oldinheritp->variable_index_offset;
     newinheritp->num_additional_variables = oldinheritp->num_additional_variables;
     newinheritp->variable_map_offset = oldinheritp->variable_map_offset;
@@ -17382,13 +17622,13 @@ copy_updated_inherit (inherit_t *oldinheritp, inherit_t *newinheritp, program_t 
             }
 
             inheritvar = inheritnext;
-        } while (inheritvar->inherit_type & INHERIT_TYPE_MAPPED);
+        } while (inheritvar->inherit_mapped);
 
         if (!inherit_variable(from->variables + j, varmodifier, inheritvar->variable_index_offset + varidx))
             return false;
     }
 
-    inheritupdate.inherit_type |= INHERIT_TYPE_DUPLICATE;
+    inheritupdate.inherit_duplicate = true;
     inheritupdate.inherit_depth = newinheritp->inherit_depth;
 
     /* Add the update function table. */
@@ -17403,12 +17643,12 @@ copy_updated_inherit (inherit_t *oldinheritp, inherit_t *newinheritp, program_t 
     ADD_INHERIT(&inheritupdate);
 
     /* Resolve further inherit mappings. */
-    while (inheritupdate.inherit_type & INHERIT_TYPE_MAPPED)
+    while (inheritupdate.inherit_mapped)
     {
         INHERIT(INHERIT_COUNT-1).updated_inherit = INHERIT_COUNT;
 
         inheritupdate = INHERIT(inheritupdate.updated_inherit);
-        inheritupdate.inherit_type |= INHERIT_TYPE_DUPLICATE;
+        inheritupdate.inherit_duplicate = true;
         inheritupdate.inherit_depth = newinheritp->inherit_depth;
         ADD_INHERIT(&inheritupdate);
     }
@@ -17451,13 +17691,13 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
             continue;
 
         /* Ignore inherits we already looked at. */
-        if(inheritdup->inherit_type & INHERIT_TYPE_DUPLICATE)
+        if(inheritdup->inherit_duplicate)
             continue;
 
         if (inheritdup->prog != progp)
             continue;
 
-        if(inheritdup->inherit_type & INHERIT_TYPE_MAPPED)
+        if(inheritdup->inherit_mapped)
         {
             /* Found it, but is obsolete.
              * We use its function and variable map and additional variables.
@@ -17470,7 +17710,7 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
         {
             /* Found it, use their variables. */
             newinheritp->variable_index_offset = inheritdup->variable_index_offset;
-            newinheritp->inherit_type |= INHERIT_TYPE_DUPLICATE;
+            newinheritp->inherit_duplicate = true;
 
             /* Adjust modifier and identifier. */
             for (int j = first_variable_index; j < last_variable_index; j++)
@@ -17491,7 +17731,7 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
             continue;
 
         /* We are only interested in the newest one. */
-        if(inheritdup->inherit_type & INHERIT_TYPE_MAPPED)
+        if(inheritdup->inherit_mapped)
             continue;
 
         if (!mstreq(inheritdup->prog->name, progp->name))
@@ -17512,7 +17752,7 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
              * We'll use their variables but also create
              * a mapping from old to new variable indices.
              */
-            if (inheritdup->inherit_type & INHERIT_TYPE_DUPLICATE)
+            if (inheritdup->inherit_duplicate)
                 continue; /* The original will come later. */
 
             update_virtual_program(from
@@ -17529,7 +17769,7 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
 
             found = true;
         }
-        else if (!(inheritdup->inherit_type & INHERIT_TYPE_DUPLICATE))
+        else if (!inheritdup->inherit_duplicate)
         {
             /* Damn, we've inherited an old program.
              * We'll have to fix that one now.
@@ -17559,9 +17799,9 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
              * Use that mapping.
              */
             assert(inheritorig != NULL);
-            assert(inheritorig->inherit_type & INHERIT_TYPE_MAPPED);
+            assert(inheritorig->inherit_mapped);
 
-            inheritdup->inherit_type |= INHERIT_TYPE_MAPPED;
+            inheritdup->inherit_mapped = true;
             inheritdup->variable_index_offset = inheritorig->variable_index_offset;
             inheritdup->num_additional_variables = inheritorig->num_additional_variables;
             inheritdup->variable_map_offset = inheritorig->variable_map_offset;
@@ -17570,7 +17810,7 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
 
             /* We need to duplicate the update inherit as well. */
             inherit_t inheritupdate = INHERIT(inheritorig->updated_inherit);
-            inheritupdate.inherit_type |= INHERIT_TYPE_DUPLICATE;
+            inheritupdate.inherit_duplicate = true;
             inheritupdate.inherit_depth = inheritdup->inherit_depth;
 
             /* And now we need to cross-define its functions. */
@@ -17585,7 +17825,7 @@ inherit_virtual_variables (inherit_t *newinheritp, program_t *from, int first_fu
             ADD_INHERIT(&inheritupdate);
 
             /* The update inherit cannot already be obsoleted, too. */
-            assert(!(inheritupdate.inherit_type & INHERIT_TYPE_MAPPED));
+            assert(!inheritupdate.inherit_mapped);
 
             /* Continue to other duplicates. */
             found = false;
@@ -17803,23 +18043,27 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
         /* Create a new inherit entry. */
         inherit_t newinherit;
         newinherit = *inheritp;
-        newinherit.inherit_type = INHERIT_TYPE_EXTRA | (inheritp->inherit_type & INHERIT_TYPE_DUPLICATE);
+        newinherit.inherit_type = INHERIT_TYPE_EXTRA;
+        newinherit.inherit_duplicate = inheritp->inherit_duplicate;
+        newinherit.inherit_mapped = false;
+        newinherit.inherit_hidden = true;
+        newinherit.inherit_public = false;
         newinherit.inherit_depth++;
         newinherit.function_index_offset += first_func_index;
         newinherit.variable_index_offset += V_VARIABLE_COUNT - last_bound_variable;
 
-        assert((inheritp->inherit_type & INHERIT_TYPE_DUPLICATE) || (last_bound_variable == inheritp->variable_index_offset));
+        assert(inheritp->inherit_duplicate || (last_bound_variable == inheritp->variable_index_offset));
 
-        if (inheritp->inherit_type & INHERIT_TYPE_MAPPED)
+        if (inheritp->inherit_mapped)
         {
-            if (!(inheritp->inherit_type & INHERIT_TYPE_DUPLICATE))
+            if (!inheritp->inherit_duplicate)
                 inherit_obsoleted_variables(&newinherit, from, last_bound_variable, varmodifier);
-            newinherit.inherit_type |= INHERIT_TYPE_MAPPED;
+            newinherit.inherit_mapped = true;
             /* The corresponding updated_inherit entry will
              * be corrected in the loop below.
              */
 
-            if (!(inheritp->inherit_type & INHERIT_TYPE_DUPLICATE))
+            if (!inheritp->inherit_duplicate)
                 last_bound_variable = inheritp->variable_index_offset + inheritp->num_additional_variables;
         }
         else
@@ -17830,7 +18074,7 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
                 newinherit.function_index_offset - first_func_index,
                 inheritp->variable_index_offset, next_bound_variable, varmodifier, first_inh_index);
 
-            if (!(inheritp->inherit_type & INHERIT_TYPE_DUPLICATE))
+            if (!inheritp->inherit_duplicate)
                 last_bound_variable = next_bound_variable;
 
             /* Now adjust the function inherit index.
@@ -17871,7 +18115,7 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
         inherit_t *cur_old_inheritp;
         int num_vars, num_funs;
 
-        if (!(from_old_inheritp->inherit_type & INHERIT_TYPE_MAPPED))
+        if (!from_old_inheritp->inherit_mapped)
             continue;
 
         cur_old_inheritp = &INHERIT(new_inherit_indices[inheritidx]);
@@ -17906,6 +18150,10 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
     frominherit.prog = from;
     frominherit.function_index_offset = first_func_index;
     frominherit.inherit_depth = 1;
+    frominherit.inherit_duplicate = false;
+    frominherit.inherit_mapped = false;
+    frominherit.inherit_hidden = (funmodifier & (TYPE_MOD_STATIC|TYPE_MOD_PROTECTED|TYPE_MOD_PRIVATE)) != 0;
+    frominherit.inherit_public = (funmodifier & TYPE_MOD_PUBLIC) != 0;
 
     /* We're done with the virtual extra inherits,
      * copy the remaining variables (variable indices from
@@ -18278,6 +18526,15 @@ inherit_program (program_t *from, funflag_t funmodifier, funflag_t varmodifier)
 
     copy_structs(from, funmodifier & ~(TYPE_MOD_STATIC|TYPE_MOD_VIRTUAL));
 
+    if (from->flags & P_USE_NONLW_EFUNS)
+    {
+        uses_non_lightweight_efuns = true;
+
+        if (!pragma_no_lightweight && pragma_warn_lightweight)
+            yywarnf("program '%s' uses efuns that cannot be called from lightweight objects"
+                   , get_txt(from->name));
+    }
+
     return initializer;
 
 } /* inherit_program() */
@@ -18599,17 +18856,37 @@ init_compiler ()
  */
 
 {
+    lpctype_t *temp1, *temp2;
+
     make_static_type(get_array_type(lpctype_unknown),               &_lpctype_unknown_array);
     make_static_type(get_array_type(lpctype_mixed),                 &_lpctype_any_array);
     make_static_type(get_union_type(lpctype_int, lpctype_float),    &_lpctype_int_float);
     make_static_type(get_array_type(lpctype_int),                   &_lpctype_int_array);
     make_static_type(get_array_type(lpctype_string),                &_lpctype_string_array);
-    make_static_type(get_array_type(lpctype_object),                &_lpctype_object_array);
+    make_static_type(get_array_type(lpctype_any_object),            &_lpctype_object_array);
     make_static_type(get_array_type(lpctype_bytes),                 &_lpctype_bytes_array);
     make_static_type(get_union_type(lpctype_string, lpctype_bytes), &_lpctype_string_bytes);
     make_static_type(get_union_type(lpctype_string_array, lpctype_bytes_array), &_lpctype_string_or_bytes_array);
-    make_static_type(get_union_type(lpctype_string, lpctype_object),&_lpctype_string_object);
+    make_static_type(get_union_type(lpctype_string, lpctype_any_object),&_lpctype_string_object);
     make_static_type(get_array_type(lpctype_string_object),         &_lpctype_string_object_array);
+    make_static_type(get_array_type(lpctype_any_lwobject),          &_lpctype_lwobject_array);
+    make_static_type(get_union_type(lpctype_any_object, lpctype_any_lwobject), &_lpctype_any_object_or_lwobject);
+    make_static_type(get_array_type(lpctype_any_object_or_lwobject), &_lpctype_any_object_or_lwobject_array);
+    make_static_type(get_array_type(lpctype_any_object_or_lwobject_array), &_lpctype_any_object_or_lwobject_array_array);
+    make_static_type(get_union_type(lpctype_int, lpctype_string),   &_lpctype_int_or_string);
+    make_static_type(get_union_type(lpctype_string, lpctype_string_array), &_lpctype_string_or_string_array);
+
+    temp1 = get_union_type(lpctype_any_object_or_lwobject, lpctype_any_struct);
+    temp2 = get_union_type(temp1, lpctype_mapping);
+    make_static_type(get_union_type(temp2, lpctype_any_array), &_lpctype_catch_msg_arg);
+    free_lpctype(temp1);
+    free_lpctype(temp2);
+
+    /* Change the name entries in the applied lfun specifications. */
+    for (applied_decl_t* decl = applied_decl_master; decl->returntype != NULL; decl++)
+        decl->name = new_tabled(decl->cname, STRING_ASCII);
+    for (applied_decl_t* decl = applied_decl_regular; decl->returntype != NULL; decl++)
+        decl->name = new_tabled(decl->cname, STRING_ASCII);
 } /* init_compiler() */
 
 /*-------------------------------------------------------------------------*/
@@ -18723,11 +19000,52 @@ printf("DEBUG: prolog: type ptrs: %p, %p\n", local_variables, context_variables 
     warned_deprecated_in = false;
 
     max_number_of_init_locals = 0;
+    num_lwo_calls = 0;
+    uses_non_lightweight_efuns = false;
 
     /* Check if call_other() has been replaced by a sefun.
      */
     call_other_sefun = get_simul_efun_index(STR_CALL_OTHER);
     call_strict_sefun = get_simul_efun_index(STR_CALL_STRICT);
+
+    /* Initialize the hash table for applied lfuns.
+     */
+    for (i = 0; i <= applied_decl_hash_table_mask; i++)
+        applied_decl_hash_table[i] = NULL;
+
+    if (isMasterObj)
+    {
+        for (applied_decl_t* decl = applied_decl_master; decl->returntype != NULL; decl++)
+        {
+            int entry = mstring_get_hash(decl->name) & applied_decl_hash_table_mask;
+            decl->next = applied_decl_hash_table[entry];
+            applied_decl_hash_table[entry] = decl;
+        }
+    }
+    else
+    {
+        for (applied_decl_t* decl = applied_decl_regular; decl->returntype != NULL; decl++)
+        {
+            int entry = mstring_get_hash(decl->name) & applied_decl_hash_table_mask;
+            decl->next = applied_decl_hash_table[entry];
+            applied_decl_hash_table[entry] = decl;
+        }
+
+        for (applied_decl_t* decl = applied_decl_hook; decl->returntype != NULL; decl++)
+        {
+            int entry;
+            string_t *name;
+
+            if (driver_hook[decl->hook].type != T_STRING)
+                continue;
+            name = driver_hook[decl->hook].u.str;
+            entry = mstring_get_hash(name) & applied_decl_hash_table_mask;
+
+            decl->name = name;  /* Not counted. */
+            decl->next = applied_decl_hash_table[entry];
+            applied_decl_hash_table[entry] = decl;
+        }
+    }
 
 } /* prolog() */
 
@@ -18860,13 +19178,13 @@ epilog (void)
             inh->function_index_offset,
             get_txt(inh->prog->name));
 
-        if (inh->inherit_type & INHERIT_TYPE_MAPPED)
+        if (inh->inherit_mapped)
             printf("(mapped to %d)\n", inh->updated_inherit);
-        else if (inh->inherit_type & INHERIT_TYPE_DUPLICATE)
+        else if (inh->inherit_duplicate)
             printf("(duplicate)\n");
-        else if (inh->inherit_type & INHERIT_TYPE_EXTRA)
+        else if (inh->inherit_type == INHERIT_TYPE_EXTRA)
             printf("(extra)\n");
-        else if (inh->inherit_type & INHERIT_TYPE_VIRTUAL)
+        else if (inh->inherit_type == INHERIT_TYPE_VIRTUAL)
             printf("(virtual)\n");
         else
             printf("(regular)\n");
@@ -19252,6 +19570,7 @@ epilog (void)
         size += align(num_function_names * sizeof *prog->function_names);
         size += align(num_functions * sizeof *prog->functions);
         size += align(num_function_headers * sizeof *prog->function_headers);
+        size += align(num_lwo_calls * sizeof *prog->lwo_call_cache);
 
         /* Get the program structure */
         if ( !(p = xalloc(size)) )
@@ -19265,7 +19584,7 @@ epilog (void)
         *prog = NULL_program;
 
         /* Set up the program structure */
-        if ( !(prog->name = new_unicode_mstring(current_loc.file->name)) )
+        if ( !(prog->name = new_unicode_tabled(current_loc.file->name)) )
         {
             xfree(prog);
             yyerrorf("Out of memory: filename '%s'", current_loc.file->name);
@@ -19278,11 +19597,13 @@ epilog (void)
         prog->id_number =
           ++current_id_number ? current_id_number : renumber_programs();
         prog->flags = (pragma_no_clone ? P_NO_CLONE : 0)
+                    | (pragma_no_lightweight ? P_NO_LIGHTWEIGHT : 0)
                     | (pragma_no_inherit ? P_NO_INHERIT : 0)
                     | (pragma_no_shadow ? P_NO_SHADOW : 0)
                     | (pragma_share_variables ? P_SHARE_VARIABLES : 0)
                     | (pragma_rtt_checks ? P_RTT_CHECKS : 0)
                     | (pragma_warn_rtt_checks ? P_WARN_RTT_CHECKS : 0)
+                    | (uses_non_lightweight_efuns ? P_USE_NONLW_EFUNS : 0)
                     ;
 
         prog->load_time = current_time;
@@ -19451,6 +19772,19 @@ epilog (void)
             for (i = 0; (size_t)i < ARGTYPE_COUNT; i++)
                 free_lpctype(ARGUMENT_TYPE(i));
         }
+
+        /* Add the lightweight object call cache.
+         */
+        if (num_lwo_calls)
+        {
+            size_t block = align(num_lwo_calls * sizeof *prog->lwo_call_cache);
+
+            prog->lwo_call_cache = (call_cache_t*)p;
+            memset(p, 0, block);
+            p += block;
+        }
+        else
+            prog->lwo_call_cache = NULL;
 
         /* Add the linenumber information.
          */
@@ -19650,6 +19984,13 @@ clear_compiler_refs (void)
     clear_lpctype_ref(lpctype_string_or_bytes_array);
     clear_lpctype_ref(lpctype_string_object);
     clear_lpctype_ref(lpctype_string_object_array);
+    clear_lpctype_ref(lpctype_lwobject_array);
+    clear_lpctype_ref(lpctype_any_object_or_lwobject);
+    clear_lpctype_ref(lpctype_any_object_or_lwobject_array);
+    clear_lpctype_ref(lpctype_any_object_or_lwobject_array_array);
+    clear_lpctype_ref(lpctype_int_or_string);
+    clear_lpctype_ref(lpctype_string_or_string_array);
+    clear_lpctype_ref(lpctype_catch_msg_arg);
 }
 
 void
@@ -19675,6 +20016,25 @@ count_compiler_refs (void)
     count_lpctype_ref(lpctype_string_or_bytes_array);
     count_lpctype_ref(lpctype_string_object);
     count_lpctype_ref(lpctype_string_object_array);
+    count_lpctype_ref(lpctype_lwobject_array);
+    count_lpctype_ref(lpctype_any_object_or_lwobject);
+    count_lpctype_ref(lpctype_any_object_or_lwobject_array);
+    count_lpctype_ref(lpctype_any_object_or_lwobject_array_array);
+    count_lpctype_ref(lpctype_int_or_string);
+    count_lpctype_ref(lpctype_string_or_string_array);
+
+    /* lpctype_catch_msg_arg has non-static union members,
+     * we need to handle them explicitly.
+     */
+    count_lpctype_ref(lpctype_catch_msg_arg);
+    count_lpctype_ref(lpctype_catch_msg_arg->t_union.head);
+    count_lpctype_ref(lpctype_catch_msg_arg->t_union.member);
+
+    /* Count names of the applied lfun declarations. */
+    for (applied_decl_t* decl = applied_decl_master; decl->returntype != NULL; decl++)
+        count_ref_from_string(decl->name);
+    for (applied_decl_t* decl = applied_decl_regular; decl->returntype != NULL; decl++)
+        count_ref_from_string(decl->name);
 }
 
 #endif
