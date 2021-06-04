@@ -328,6 +328,27 @@ static mixed _clone_uids_fun (object blueprint, string new_name, object prev)
 }
 #endif
 
+//---------------------------------------------------------------------------
+static void _create_fun (object ob, object creator)
+
+// Initializes the given object that has just been created.
+// It just calls ob->reset(0).
+//
+// Argument:
+//   ob:        the created object
+//   creator:   the creator
+//
+
+{
+  closure fun;
+
+  set_this_object(ob);
+  fun = symbol_function("reset", ob);
+
+  set_this_object(creator);
+  funcall(fun, 0);
+}
+
 //===========================================================================
 //  Initialisation
 //
@@ -432,13 +453,36 @@ void inaugurate_master (int arg)
       #'_clone_uids_fun, 'blueprint, 'new_name, ({#'previous_object}) })
                   )
   );
-  set_driver_hook(H_CREATE_SUPER, "reset");
-  set_driver_hook(H_CREATE_OB,    "reset");
-  set_driver_hook(H_CREATE_CLONE, "reset");
-    /* PLAIN: Non-compat muds like OSB use "create" or other functions
-     * for the above.
-     */
-  set_driver_hook(H_RESET,        "reset");
+  /* We simulate the old compat mode behavior and call reset()
+   * with an argument (0 when creating, 1 when resetting).
+   *
+   * Non-compat mudlibs usually specify "create" for the H_CREATE_* hooks
+   * and "reset" for the H_RESET hook.
+   */
+  set_driver_hook(
+    H_CREATE_SUPER,
+    unbound_lambda( ({ 'ob }), ({
+      #'_create_fun, 'ob, ({#'this_object}) })
+                  )
+  );
+  set_driver_hook(
+    H_CREATE_OB,
+    unbound_lambda( ({ 'ob }), ({
+      #'_create_fun, 'ob, ({#'this_object}) })
+                  )
+  );
+  set_driver_hook(
+    H_CREATE_CLONE,
+    unbound_lambda( ({ 'ob }), ({
+      #'_create_fun, 'ob, ({#'this_object}) })
+                  )
+  );
+  set_driver_hook(
+    H_RESET,
+    unbound_lambda(0, ({
+      #'funcall, ({#'symbol_function, "reset", ({#'this_object})}), 1 })
+                  )
+  );
   set_driver_hook(H_CLEAN_UP,     "clean_up");
   set_driver_hook(H_MODIFY_COMMAND,
     ([ "e":"east", "w":"west", "s":"south", "n":"north"

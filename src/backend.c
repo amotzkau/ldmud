@@ -73,6 +73,7 @@
 #include "wiz_list.h"
 #include "xalloc.h"
 
+#include "i-current_object.h"
 #include "i-eval_cost.h"
 
 #include "../mudlib/sys/configuration.h"
@@ -280,10 +281,10 @@ clear_state (void)
 
 {
     current_loc.file = NULL;
-    current_object = NULL;
+    clear_current_object();
     command_giver = NULL;
     current_interactive = NULL;
-    previous_ob = NULL;
+    previous_ob = const0;
     current_prog = NULL;
     reset_machine(MY_FALSE);   /* Pop down the stack. */
     num_warning = 0;
@@ -601,10 +602,10 @@ cleanup_stuff (void)
             lambda_t *l;
 
             l = driver_hook[i].u.lambda;
-            if (l->ob != master_ob)
+            if (l->ob.type != T_OBJECT || l->ob.u.ob != master_ob)
             {
-                free_object(l->ob, "backend");
-                l->ob = ref_object(master_ob, "backend");
+                free_svalue(&(l->ob));
+                put_ref_object(&(l->ob), master_ob, "backend");
             }
         }
     }
@@ -805,7 +806,7 @@ backend (void)
             if (game_is_being_shut_down)
             {
                 command_giver = NULL;
-                current_object = NULL;
+                clear_current_object();
                 return;
             }
 
@@ -813,9 +814,9 @@ backend (void)
                 deep_destruct(master_ob);
                 master_will_be_updated = MY_FALSE;
                 command_giver = NULL;
-                current_object = &dummy_current_object_for_loads;
+                set_current_object(&dummy_current_object_for_loads);
                 callback_master(STR_EXT_RELOAD, 0);
-                current_object = NULL;
+                clear_current_object();
             }
 
             if (gc_request != gcDont) {
@@ -835,7 +836,7 @@ backend (void)
                              );
                   write(1, buf, strlen(buf));
                   command_giver = NULL;
-                  current_object = NULL;
+                  clear_current_object();
                   /* if the GC was not requested by an efun call, low_memory()
                    * in the master is called to inform the game. */
                   notify_lowmemory_condition(gc_request == gcEfun ?
@@ -873,7 +874,7 @@ backend (void)
                         sprintf(shut_msg, "%s slow_shut_down(%d)\n", time_stamp(), minutes);
                         write(1, shut_msg, strlen(shut_msg));
 
-                        previous_ob = NULL;
+                        previous_ob = const0;
                         command_giver = NULL;
                         current_interactive = NULL;
 
@@ -933,7 +934,7 @@ backend (void)
              * then set current_object to point to the object that defines
              * the command. This will enable such functions to be static.
              */
-            current_object = NULL;
+            clear_current_object();
             current_interactive = command_giver;
 
             (void)O_SET_INTERACTIVE(ip, command_giver);
@@ -1021,7 +1022,7 @@ backend (void)
                 current_time = cur_time.tv_sec + 1;
             
             
-            current_object = NULL;
+            clear_current_object();
 
             /* Start the next alarm */
             comm_time_to_call_heart_beat = MY_FALSE;
@@ -1364,9 +1365,9 @@ static Bool did_swap;
                 RESET_LIMITS;
                 CLEAR_EVAL_COST;
                 command_giver = 0;
-                previous_ob = NULL;
+                previous_ob = const0;
                 trace_level = 0;
-                reset_object(obj, H_RESET);
+                reset_object(obj, H_RESET, 0);
                 mark_end_evaluation();
                 if (obj->flags & O_DESTRUCTED)
                     continue;
@@ -1438,8 +1439,8 @@ static Bool did_swap;
             RESET_LIMITS;
             CLEAR_EVAL_COST;
             command_giver = NULL;
-            previous_ob = NULL;
-            current_object = obj;
+            previous_ob = const0;
+            set_current_object(obj);
             trace_level = 0;
             if (driver_hook[H_CLEAN_UP].type == T_CLOSURE)
             {
@@ -1449,8 +1450,8 @@ static Bool did_swap;
                 l = driver_hook[H_CLEAN_UP].u.lambda;
                 if (driver_hook[H_CLEAN_UP].x.closure_type == CLOSURE_LAMBDA)
                 {
-                    free_object(l->ob, "clean_up");
-                    l->ob = ref_object(obj, "clean_up");
+                    free_svalue(&(l->ob));
+                    put_ref_object(&(l->ob), obj, "clean_up");
                 }
                 push_ref_object(inter_sp, obj, "clean up");
                 call_lambda(&driver_hook[H_CLEAN_UP], 2);
