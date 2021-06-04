@@ -218,6 +218,7 @@ struct ident_s
 #define I_GLOBAL_VARIABLE_FUN    (USHRT_MAX - 1)
 #define I_GLOBAL_EFUN_OTHER      (USHRT_MAX)
 #define I_GLOBAL_SEFUN_OTHER     (USHRT_MAX)
+#define I_GLOBAL_SEFUN_BY_NAME   (USHRT_MAX - 2)        /* Has no entry in the table. */
 #define I_GLOBAL_STRUCT_NONE     (USHRT_MAX)
 #ifdef USE_PYTHON
 #  define I_GLOBAL_PYTHON_EFUN_OTHER (USHRT_MAX)
@@ -248,6 +249,7 @@ extern Bool pragma_no_shadow;
 extern Bool pragma_pedantic;
 extern Bool pragma_range_check;
 extern Bool pragma_warn_missing_return;
+extern Bool pragma_warn_dead_code;
 extern Bool pragma_warn_deprecated;
 extern Bool pragma_warn_empty_casts;
 extern Bool pragma_check_overloads;

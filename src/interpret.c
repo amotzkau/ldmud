@@ -237,6 +237,7 @@
 #include "xalloc.h"
 
 #include "i-eval_cost.h"
+#include "i-svalue_cmp.h"
 
 #include "pkg-python.h"
 
@@ -3751,35 +3752,25 @@ inter_add_array (vector_t *q, vector_t **vpp)
 
     /* Allocate the result vector and copy p into it.
      */
-    if (!(p->ref-1))
+    if (p->ref == 1)
     {
-        /* p will be deallocated completely - try to optimize a bit */
-
-        /* We try to expand the existing memory for p (without moving)
-         * instead of allocating a completely new vector.
+        /* p is not needed anymore, we can reuse it.
+         * We will expand the existing memory for p. If this is
+         * not possible, the allocator will move the memory block.
          */
-        d = malloc_increment_size(p, q_size * sizeof(svalue_t));
-        if ( NULL != d)
+        r = rexalloc(p, sizeof(vector_t) + sizeof(svalue_t) * (p_size + q_size));
+        if (!r)
         {
-            /* We got the additional memory */
-            r = p;
-            r->ref = 1;
-            r->size = p_size + q_size;
-
-            r->user->size_array -= p_size;
-            r->user = current_object->user;
-            r->user->size_array += p_size + q_size;
-        } else
-        /* Just allocate a new vector and memcopy p into it. */
-        {
-            r = allocate_uninit_array((p_int)(p_size + q_size));
-            deref_array(p);
-            d = r->item;
-            for (cnt = (mp_int)p_size; --cnt >= 0; )
-            {
-                *d++ = *s++;
-            }
+            inter_sp += 2;
+            errorf("Out of memory: array of size: %zu.\n", p_size + q_size);
         }
+
+        r->size = p_size + q_size;
+        d = r->item + p_size;
+
+        r->user->size_array -= p_size;
+        r->user = current_object->user;
+        r->user->size_array += p_size + q_size;
     }
     else
     {
@@ -3820,9 +3811,6 @@ inter_add_array (vector_t *q, vector_t **vpp)
 
         deref_array(q);
     }
-
-    if (!p->ref && p != q)
-        free_empty_vector(p);
 
     return r;
 } /* inter_add_array() */
@@ -11652,6 +11640,123 @@ again:
         break;
     }
 
+    CASE(F_IN);                     /* --- in                  --- */
+    {
+        /* Do a membership test for sp[-1] in sp[0].
+         * Leave 1 for success, 0 for failure on the stack.
+         */
+        int result = 0;
+        svalue_t *container = get_rvalue(sp, NULL);
+        struct protected_range_lvalue *container_range = NULL;
+        svalue_t *item = get_rvalue(sp-1, NULL);
+
+        if (item == NULL)
+            item = sp-1;
+
+        if (container == NULL)
+        {
+            /* string or pointer range. */
+            container_range = sp->u.protected_range_lvalue;
+            container = &(container_range->vec);
+        }
+
+        switch (container->type)
+        {
+            case T_POINTER:
+            {
+                vector_t *vec = container->u.vec;
+                p_int start = container_range == NULL ? 0 : container_range->index1;
+                p_int count = container_range == NULL ? VEC_SIZE(vec) : (container_range->index2 - container_range->index1);
+
+                for (svalue_t *entry = container->u.vec->item + start; count != 0; entry++, count--)
+                {
+                    if (rvalue_eq(item, entry) == 0)
+                    {
+                        result = 1;
+                        break;
+                    }
+                }
+                break;
+            }
+
+            case T_MAPPING:
+                result = get_map_value(container->u.map, item) != &const0;
+                break;
+
+            case T_STRING:
+            case T_BYTES:
+            {
+                string_t *str = container->u.str;
+                p_int start = container_range == NULL ? 0 : container_range->index1;
+                p_int len = container_range == NULL ? mstrsize(str) : (container_range->index2 - container_range->index1);
+                struct protected_range_lvalue *item_range = NULL;
+
+                if (item->type == T_LVALUE)
+                {
+                    item_range = item->u.protected_range_lvalue;
+                    item = &(item_range->vec);
+                }
+
+                switch (item->type)
+                {
+                    case T_NUMBER:
+                        if (str->info.unicode == STRING_UTF8)
+                        {
+                            char* s = get_txt(str) + start;
+                            p_int ch = item->u.number;
+
+                            while (len > 0)
+                            {
+                                p_int elem;
+                                size_t elemlen = utf8_to_unicode(s, len, &elem);
+                                if (!elemlen)
+                                    break;
+                                if (elem == ch)
+                                {
+                                    result = 1;
+                                    break;
+                                }
+
+                                s += elemlen;
+                                len -= elemlen;
+                            }
+                        }
+                        else if (item->u.number & ~0xff)
+                            result = 0;
+                        else
+                            result = memchr(get_txt(str) + start, item->u.number, len) != NULL;
+                        break;
+
+                    case T_STRING:
+                    case T_BYTES:
+                        if (item->type == container->type)
+                        {
+                            p_int itemlen = item_range == NULL ? mstrsize(item->u.str) : (item_range->index2 - item_range->index1);
+                            const char* found = mstring_mstr_n_str(str, start
+                                                                 , get_txt(item->u.str) + (item_range == NULL ? 0 : item_range->index1)
+                                                                 , itemlen);
+                            result = found != NULL
+                                  && found - get_txt(str) + itemlen <= start + len;
+                            break;
+                        }
+                        /* else FALLTHROUGH */
+                    default:
+                        OP_ARG_ERROR(1, TF_NUMBER|(container->type == T_STRING ? TF_STRING : TF_BYTES), item->type);
+                }
+                break;
+            }
+
+            default:
+                OP_ARG_ERROR(2, TF_POINTER|TF_MAPPING|TF_STRING|TF_BYTES, sp->type);
+                /* NOTREACHED */
+        }
+
+        pop_stack();
+        free_svalue(sp);
+        put_number(sp, result);
+        break;
+    }
+
     CASE(F_COMPL);                  /* --- compl               --- */
         /* Compute the binary complement of number sp[0] and leave
          * that on the stack.
@@ -14955,7 +15060,8 @@ again:
          * through the ap pointer; otherwise the code assumes that the
          * compiler left the proper number of arguments on the stack.
          *
-         * <code> is an ushort and indexes the function list *simul_efunp.
+         * <code> is an ushort and indexes the function list
+         * simul_efun_table[].
          */
 
         unsigned short      code;      /* the function index */
@@ -14968,11 +15074,13 @@ again:
 
         /* Get the sefun code and the number of arguments on the stack */
         LOAD_SHORT(code, pc);
-        def_narg = simul_efunp[code].num_arg;
+
+        entry = &simul_efun_table[code];
+        def_narg = entry->function.num_arg;
 
         if (use_ap
-         || (simul_efunp[code].flags & (TYPE_MOD_VARARGS|TYPE_MOD_XVARARGS))
-         || simul_efunp[code].num_opt_arg
+         || (entry->function.flags & (TYPE_MOD_VARARGS|TYPE_MOD_XVARARGS))
+         || entry->function.num_opt_arg
            )
         {
             use_ap = MY_FALSE;  /* Reset the flag */
@@ -14982,14 +15090,14 @@ again:
             num_arg = def_narg;
 
         /* Correct the number of arguments on the stack */
-        if (num_arg != def_narg && !(simul_efunp[code].flags & TYPE_MOD_VARARGS))
+        if (num_arg != def_narg && !(entry->function.flags & TYPE_MOD_VARARGS))
         {
             /* If it's an XVARARGS, we don't require the last argument. */
-            if (simul_efunp[code].flags & TYPE_MOD_XVARARGS)
+            if (entry->function.flags & TYPE_MOD_XVARARGS)
                 def_narg--;
 
             /* Add eventually missing arguments */
-            while (num_arg < def_narg - simul_efunp[code].num_opt_arg)
+            while (num_arg < def_narg - entry->function.num_opt_arg)
             {
                 sp++;
                 put_number(sp, 0);
@@ -14997,7 +15105,7 @@ again:
             }
 
             /* Remove extraneous arguments */
-            if (!(simul_efunp[code].flags & TYPE_MOD_XVARARGS))
+            if (!(entry->function.flags & TYPE_MOD_XVARARGS))
             {
                 while (num_arg > def_narg)
                 {
@@ -15032,9 +15140,6 @@ again:
                 errorf("Couldn't load simul_efun object.\n");
             }
         }
-
-        /* Get the function code information */
-        entry = &simul_efun_table[code];
 
         if ( NULL != (funstart = entry->funstart) )
         {
@@ -18650,7 +18755,10 @@ call_simul_efun (unsigned int code, object_t *ob, int num_arg)
 {
     string_t *function_name;
 
-    function_name = simul_efunp[code].name;
+    assert(code != I_GLOBAL_SEFUN_BY_NAME);
+    assert(code < SEFUN_TABLE_SIZE);
+
+    function_name = simul_efun_table[code].function.name;
 
     /* First, try calling the function in the given object */
     if (!int_apply(function_name, ob, num_arg, MY_FALSE, MY_FALSE))

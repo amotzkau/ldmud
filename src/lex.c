@@ -155,6 +155,10 @@ Bool pragma_warn_missing_return;
    * does end with an explicit return statement.
    */
 
+Bool pragma_warn_dead_code;
+  /* True: generate a warning if dead code was detected.
+   */
+
 Bool pragma_check_overloads;
   /* TRUE if function redefinitions have to match the originals in their
    * types. This pragma is meant mainly to ease the adaption of old
@@ -1706,7 +1710,7 @@ undefined_function:
          * Check it with a privilege violation.
          */
         if (!privileged && efun_override == OVERRIDE_EFUN && p->u.global.sim_efun != I_GLOBAL_SEFUN_OTHER
-         && simul_efunp[p->u.global.sim_efun].flags & TYPE_MOD_NO_MASK)
+         && get_simul_efun_header(p)->flags & TYPE_MOD_NO_MASK)
         {
             svalue_t *res;
 
@@ -3925,6 +3929,16 @@ handle_pragma (char *str)
             pragma_warn_missing_return = MY_FALSE;
             validPragma = MY_TRUE;
         }
+        else if (wordcmp(base, "warn_dead_code", namelen) == 0)
+        {
+            pragma_warn_dead_code = MY_TRUE;
+            validPragma = MY_TRUE;
+        }
+        else if (wordcmp(base, "no_warn_dead_code", namelen) == 0)
+        {
+            pragma_warn_dead_code = MY_FALSE;
+            validPragma = MY_TRUE;
+        }
         else if (wordcmp(base, "warn_function_inconsistent", namelen) == 0)
         {
             pragma_check_overloads = MY_TRUE;
@@ -4741,6 +4755,13 @@ closure (char *in_yyp)
                     , super_name, wordstart);
             ix = CLOSURE_EFUN_OFFS;
         }
+        if (ix >= CLOSURE_IDENTIFIER_OFFS)
+        {
+            yyerrorf("Too high function index of %.50s::%.50s for #'"
+                    , super_name, wordstart);
+            ix = CLOSURE_EFUN_OFFS;
+        }
+
         *yyp = c;
         *(wordstart-2) = ':';
 
@@ -4818,7 +4839,7 @@ closure (char *in_yyp)
      */
     if (efun_override == OVERRIDE_EFUN
      && p->u.global.sim_efun != I_GLOBAL_SEFUN_OTHER
-     && simul_efunp[p->u.global.sim_efun].flags & TYPE_MOD_NO_MASK
+     && (get_simul_efun_header(p)->flags & TYPE_MOD_NO_MASK)
      && (p->u.global.efun != I_GLOBAL_EFUN_OTHER
 #ifdef USE_PYTHON
       || is_python_efun(p)
@@ -4872,12 +4893,14 @@ closure (char *in_yyp)
             int i;
 
             i = p->u.global.function;
-            yylval.closure.number = i;
             if (i >= CLOSURE_IDENTIFIER_OFFS)
-                yyerrorf(
-                  "Too high function index of %s for #'",
-                  get_txt(p->name)
-                );
+            {
+                yyerrorf("Too high function index of %s for #'"
+                        , get_txt(p->name));
+                i = CLOSURE_EFUN_OFFS;
+            }
+
+            yylval.closure.number = i;
             break;
         }
 
@@ -4885,9 +4908,8 @@ closure (char *in_yyp)
         if ((efun_override == OVERRIDE_NONE || efun_override == OVERRIDE_SEFUN)
          && p->u.global.sim_efun != I_GLOBAL_SEFUN_OTHER && !disable_sefuns)
         {
-            yylval.closure.number =
-              p->u.global.sim_efun + CLOSURE_SIMUL_EFUN_OFFS;
-            break;
+            yylval.ident = p;
+            return L_SIMUL_EFUN_CLOSURE;
         }
 
 #ifdef USE_PYTHON
@@ -4895,7 +4917,14 @@ closure (char *in_yyp)
         if ((efun_override == OVERRIDE_NONE || efun_override == OVERRIDE_EFUN)
          && is_python_efun(p))
         {
-            yylval.closure.number = p->u.global.python_efun + CLOSURE_PYTHON_EFUN_OFFS;
+            if (p->u.global.python_efun >= CLOSURE_EFUN_OFFS - CLOSURE_PYTHON_EFUN_OFFS)
+            {
+                yyerrorf("Too high python efun index of %s for #'"
+                        , get_txt(p->name));
+                yylval.closure.number = CLOSURE_EFUN_OFFS;
+            }
+            else
+                yylval.closure.number = p->u.global.python_efun + CLOSURE_PYTHON_EFUN_OFFS;
             break;
         }
 #endif
@@ -4933,9 +4962,18 @@ closure (char *in_yyp)
                 yylval.closure.number = CLOSURE_IDENTIFIER_OFFS;
                 break;
             }
-            yylval.closure.number =
-              p->u.global.variable + num_virtual_variables +
-              CLOSURE_IDENTIFIER_OFFS;
+#ifdef USE_PYTHON
+            if (p->u.global.variable + num_virtual_variables >= CLOSURE_PYTHON_EFUN_OFFS - CLOSURE_IDENTIFIER_OFFS)
+#else
+            if (p->u.global.variable + num_virtual_variables >= CLOSURE_EFUN_OFFS - CLOSURE_IDENTIFIER_OFFS)
+#endif
+            {
+                yyerrorf("Too high variable index of %s for #'"
+                        , get_txt(p->name));
+                yylval.closure.number = CLOSURE_IDENTIFIER_OFFS;
+            }
+            else
+                yylval.closure.number = p->u.global.variable + num_virtual_variables + CLOSURE_IDENTIFIER_OFFS;
             break;
         }
 
@@ -6193,6 +6231,7 @@ start_new_file (int fd, const char * fname)
     pragma_no_shadow = MY_FALSE;
     pragma_pedantic = MY_FALSE;
     pragma_warn_missing_return = MY_TRUE;
+    pragma_warn_dead_code = MY_FALSE;
     pragma_warn_deprecated = MY_TRUE;
     pragma_range_check = MY_FALSE;
     pragma_warn_empty_casts = MY_TRUE;
