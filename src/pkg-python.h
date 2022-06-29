@@ -60,6 +60,8 @@ extern void python_interrupt();
 extern void python_handle_sigchld();
 extern void python_process_pending_jobs();
 
+extern void cleanup_python_data(cleanup_t * context);
+
 #ifdef GC_SUPPORT
 extern void python_clear_refs();
 extern void python_count_refs();

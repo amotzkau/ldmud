@@ -180,7 +180,6 @@ static lambda_t *stale_lambda_closures;
 /*            Object clean up
  */
 
-typedef struct cleanup_s cleanup_t;
 typedef struct cleanup_map_extra_s cleanup_map_extra_t;
 
 
@@ -223,9 +222,6 @@ struct cleanup_map_extra_s
     cleanup_t  *context;  /* The cleanup context */
 };
 
-
-/* Forward declarations */
-static void cleanup_vector (svalue_t *svp, size_t num, cleanup_t * context);
 
 /*-------------------------------------------------------------------------*/
 static cleanup_t *
@@ -386,7 +382,7 @@ cleanup_closure (svalue_t *csvp, cleanup_t * context)
 } /* cleanup_closure() */
 
 /*-------------------------------------------------------------------------*/
-static void
+void
 cleanup_vector (svalue_t *svp, size_t num, cleanup_t * context)
 
 /* Cleanup the <num> svalues in vector/svalue block <svp>.
@@ -609,6 +605,10 @@ cleanup_structures (cleanup_t * context)
                 cleanup_vector(&driver_hook[i], 1, context);
         }
     }
+
+#ifdef USE_PYTHON
+    cleanup_python_data(context);
+#endif
 } /* cleanup_structures() */
 
 /*-------------------------------------------------------------------------*/

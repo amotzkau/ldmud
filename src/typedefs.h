@@ -18,6 +18,7 @@ typedef bytecode_t              * bytecode_p;         /* bytecode.h */
 typedef struct callback_s         callback_t;         /* simulate.h */
 typedef struct case_list_entry_s  case_list_entry_t;  /* switch.h */
 typedef struct case_state_s       case_state_t;       /* switch.h */
+typedef struct cleanup_s          cleanup_t;          /* gcollect.c */
 typedef struct error_handler_s    error_handler_t;    /* interpret.h */
 typedef struct fulltype_s         fulltype_t;         /* types.h */
 typedef struct function_s         function_t;         /* exec.h */

@@ -5423,6 +5423,73 @@ closure_python_efun_to_string (int type)
     return get_txt(python_efun_names[type - CLOSURE_PYTHON_EFUN]->name);
 }
 
+/*-------------------------------------------------------------------------*/
+void
+cleanup_python_data (cleanup_t * context)
+
+/* Cleanup any Python-held LPC values. */
+
+{
+    for(ldmud_gc_var_t* var = gc_object_list; var != NULL; var = var->gcnext)
+    {
+        object_t* ob = ((ldmud_object_t*)var)->lpc_object;
+        if(ob != NULL && (ob->flags & O_DESTRUCTED))
+        {
+            free_object(ob, "cleanup_python_data");
+            ((ldmud_object_t*)var)->lpc_object = NULL;
+        }
+    }
+
+    for(ldmud_gc_var_t* var = gc_array_list; var != NULL; var = var->gcnext)
+    {
+        vector_t* arr = ((ldmud_array_t*)var)->lpc_array;
+        if (arr != NULL)
+            cleanup_vector(arr->item, VEC_SIZE(arr), context);
+    }
+
+    for(ldmud_gc_var_t* var = gc_mapping_list; var != NULL; var = var->gcnext)
+    {
+        mapping_t* m = ((ldmud_mapping_t*)var)->lpc_mapping;
+        if (m != NULL)
+        {
+            /* Let cleanup_vector do that. */
+            svalue_t mapping = { T_MAPPING, {}, {.map = m} };
+            cleanup_vector(&mapping, 1, context);
+        }
+    }
+
+    for(ldmud_gc_var_t* var = gc_mapping_list_list; var != NULL; var = var->gcnext)
+    {
+        /* Let cleanup_vector do that. */
+        svalue_t values[2] = { { T_MAPPING, {}, {.map = ((ldmud_mapping_list_t*)var)->map} },
+                               { T_POINTER, {}, {.vec = ((ldmud_mapping_list_t*)var)->indices} } };
+        cleanup_vector(values, 2, context);
+    }
+
+    for(ldmud_gc_var_t* var = gc_struct_list; var != NULL; var = var->gcnext)
+    {
+        struct_t* s = ((ldmud_struct_t*)var)->lpc_struct;
+        if(s != NULL)
+            cleanup_vector(s->member, struct_size(s), context);
+    }
+
+    for(ldmud_gc_var_t* var = gc_closure_list; var != NULL; var = var->gcnext)
+    {
+        cleanup_vector(&((ldmud_closure_t*)var)->lpc_closure, 1, context);
+    }
+
+    for(ldmud_gc_var_t* var = gc_symbol_list; var != NULL; var = var->gcnext)
+    {
+        cleanup_vector(&((ldmud_symbol_t*)var)->lpc_symbol, 1, context);
+    }
+
+    for(ldmud_gc_var_t* var = gc_quoted_array_list; var != NULL; var = var->gcnext)
+    {
+        cleanup_vector(&((ldmud_quoted_array_t*)var)->lpc_quoted_array, 1, context);
+    }
+
+} /* cleanup_python_data() */
+
 #ifdef GC_SUPPORT
 
 /*-------------------------------------------------------------------------*/
