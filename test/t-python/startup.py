@@ -26,6 +26,10 @@ class TestObject(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ob = ldmud.Object("/imnotthere")
 
+    def testUninitializedObject(self):
+        ob = ldmud.Object.__new__(ldmud.Object)
+        self.assertEqual(ldmud.efuns.copy(ob), 0)
+
 class TestArray(unittest.TestCase):
     def testInitEmpty(self):
         arr = ldmud.Array()
@@ -124,6 +128,11 @@ class TestArray(unittest.TestCase):
         del parr[10:0:-3]
         self.assertEqual(list(arr), parr)
 
+    def testUninitializedArray(self):
+        arr = ldmud.Array.__new__(ldmud.Array)
+        ca = ldmud.efuns.copy(arr)
+        self.assertIsNotNone(ca)
+        self.assertEqual(len(ca), 0)
 
 class TestMapping(unittest.TestCase):
     def testInitEmpty(self):
@@ -233,6 +242,12 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(set(m.keys()), set(("One", "Two", "Three",)))
         self.assertEqual(set(m.values()), set((1,2,3,)))
 
+    def testUninitializedMapping(self):
+        m = ldmud.Mapping.__new__(ldmud.Mapping)
+        cm = ldmud.efuns.copy(m)
+        self.assertIsNotNone(cm)
+        self.assertEqual(len(cm), 0)
+
 class TestStruct(unittest.TestCase):
     def setUp(self):
         self.master = ldmud.efuns.find_object("/master")
@@ -272,6 +287,10 @@ class TestStruct(unittest.TestCase):
         self.assertEqual(s.t_float, 5.5)
         self.assertEqual(s.t_string, 'Hello!')
 
+    def testUninitializedStruct(self):
+        s = ldmud.Struct.__new__(ldmud.Struct)
+        self.assertEqual(ldmud.efuns.copy(s), 0)
+
 class TestClosure(unittest.TestCase):
     def setUp(self):
         self.master = ldmud.get_master()
@@ -305,6 +324,7 @@ class TestClosure(unittest.TestCase):
         s = ldmud.Closure.__new__(ldmud.Closure)
         with self.assertRaises(Exception):
             s()
+        self.assertEqual(ldmud.efuns.copy(s), 0)
 
 class TestSymbol(unittest.TestCase):
     def testSymbolInit(self):
@@ -331,6 +351,10 @@ class TestSymbol(unittest.TestCase):
         self.assertEqual(s1, s2)
         self.assertNotEqual(s1, s3)
         self.assertNotEqual(s1, s4)
+
+    def testUninitializedSymbol(self):
+        s = ldmud.Symbol.__new__(ldmud.Symbol)
+        self.assertEqual(ldmud.efuns.copy(s), 0)
 
 class TestQuotedArray(unittest.TestCase):
     def testQuotedArrayInit(self):
@@ -361,6 +385,10 @@ class TestQuotedArray(unittest.TestCase):
     def testQuotedArrayInitInvalid(self):
         with self.assertRaises(TypeError):
             ldmud.QuotedArray(1.5, 1)
+
+    def testUninitializedQuotedArray(self):
+        qa = ldmud.QuotedArray.__new__(ldmud.QuotedArray)
+        self.assertEqual(ldmud.efuns.copy(qa), 0)
 
 class TestEfuns(unittest.TestCase):
     def testDir(self):
