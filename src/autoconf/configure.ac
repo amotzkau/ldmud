@@ -256,6 +256,7 @@ AC_MY_ARG_ENABLE(trace-code,yes,,[trace the most recently executed bytecode])
 AC_MY_ARG_ENABLE(rxcache_table,yes,,[Cache compiled regular expressions])
 AC_MY_ARG_ENABLE(synchronous-heart-beat,yes,,[Do all heart beats at once.])
 
+AC_MY_ARG_ENABLE(posix-timers,no,,[Use POSIX timers for the execution timer])
 AC_MY_ARG_ENABLE(opcprof,no,,[create VM instruction usage statistics])
 AC_MY_ARG_ENABLE(verbose-opcprof,no,,[with opcprof: include instruction names])
 AC_MY_ARG_ENABLE(debug,yes,,[enable sanity checks])
@@ -537,6 +538,7 @@ AC_CDEF_FROM_ENABLE(trace_code)
 AC_CDEF_FROM_ENABLE(rxcache_table)
 AC_CDEF_FROM_ENABLE(synchronous_heart_beat)
 
+AC_UPDATE_VAR(enable_posix_timers)
 AC_CDEF_FROM_ENABLE(opcprof)
 AC_CDEF_FROM_ENABLE(verbose_opcprof)
 AC_CDEF_FROM_ENABLE(debug)
@@ -1869,6 +1871,50 @@ if test "x$enable_use_mccp" = "x" || test "x$enable_use_mccp" = "xyes"; then
         cdef_use_mccp="#undef"
         enable_use_mccp="no"
     fi
+fi
+
+# --- Check for POSIX timer ---
+
+AC_MY_SEARCH_LIB(RT,posix-timers,lp_cv_has_posix_timers,posix,posix_path,
+[
+    #include <signal.h>
+    #include <time.h>
+
+    int init(void)
+    {
+        timer_t timerid;
+        struct sigevent sev;
+        struct itimerspec its;
+
+        sev.sigev_notify = SIGEV_SIGNAL;
+        sev.sigev_signo = SIGPROF;
+        sev.sigev_value.sival_ptr = &timerid;
+        if (timer_create(CLOCK_REALTIME, &sev, &timerid) == -1)
+            return 1;
+
+        its.it_value.tv_sec = 0;
+        its.it_value.tv_nsec = 500000000;
+        its.it_interval.tv_sec = its.it_value.tv_sec;
+        its.it_interval.tv_nsec = its.it_value.tv_nsec;
+
+        if (timer_settime(timerid, 0, &its, NULL) == -1)
+            return 2;
+
+        timer_delete(timerid);
+        return 0;
+    }
+],rt,timer_create,enable_posix_timers)
+
+if test "$lp_cv_has_posix_timers" = "yes"; then
+    AC_DEFINE(USE_POSIX_TIMERS, 1, [Use POSIX timers for the execution timer?])
+else
+    if test "x$enable_posix_timers" = "xyes"; then
+        echo "POSIX timer not supported - disabling."
+        AC_NOT_AVAILABLE(posix-timers)
+    fi
+
+    cdef_posix_timers="#undef"
+    enable_posix_timers="no"
 fi
 
 # ---

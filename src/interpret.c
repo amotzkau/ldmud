@@ -189,6 +189,7 @@
 
 #include "my-alloca.h"
 #include <assert.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -757,6 +758,16 @@ struct timeval profiling_timevalue = {0, 0};
 
 static Bool received_prof_signal = MY_FALSE;
 
+#ifdef USE_POSIX_TIMERS
+static timer_t prof_timer;
+  /* POSIX timer id used for the profiling signal.
+   */
+
+static bool have_prof_timer = false;
+  /* Is prof_timer a valid timer?
+   */
+#endif
+
 p_int used_memory_at_eval_start = 0;
   /* used memory (in bytes) at the beginning of the current execution,
    * set by mark_start_evaluation() (and v_limited()).
@@ -841,6 +852,28 @@ assign_eval_cost_inl(void)
 void assign_eval_cost(void) { assign_eval_cost_inl(); }
 
 /*-------------------------------------------------------------------------*/
+
+bool
+init_profiling_timer ()
+/* Initializes the timer used for long execution signals.
+ */
+{
+#ifdef USE_POSIX_TIMERS
+    struct sigevent sev;
+
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGPROF;
+    sev.sigev_value.sival_ptr = NULL;
+    sev.sigev_value.sival_int = 0;
+    if (timer_create(CLOCK_REALTIME, &sev, &prof_timer) == -1)
+        return false;
+
+    have_prof_timer = true;
+#endif
+    return true;
+} /* init_profiling_timer() */
+
+/*-------------------------------------------------------------------------*/
 void
 handle_profiling_signal(int ignored)
 /* signal handler for the SIGPROF signal. Just sets a flag which is checked in
@@ -860,6 +893,9 @@ mark_start_evaluation (void)
 {
     // .it_interval is always zero (no auto-repeat), .it_value will be set later
     static struct itimerval prof_time_val = { {0,0}, {0,0} };
+#ifdef USE_POSIX_TIMERS
+    static struct itimerspec prof_ptime_val = { {0,0}, {0,0} };
+#endif
 
     total_evalcost = 0;
     eval_number++;
@@ -867,8 +903,24 @@ mark_start_evaluation (void)
     // start the profiling timer if enabled
     if (profiling_timevalue.tv_usec || profiling_timevalue.tv_sec)
     {
-        prof_time_val.it_value = profiling_timevalue;
-        setitimer(ITIMER_PROF, &prof_time_val, NULL);
+#ifdef USE_POSIX_TIMERS
+        if (have_prof_timer)
+        {
+            prof_ptime_val.it_value.tv_sec = profiling_timevalue.tv_sec;
+            prof_ptime_val.it_value.tv_nsec = profiling_timevalue.tv_usec * 1000L;
+            if (timer_settime(prof_timer, 0, &prof_ptime_val, NULL) == -1)
+            {
+                debug_message("%s Could not start execution timer: %s\n"
+                      , time_stamp(), strerror(errno));
+                have_prof_timer = false;
+            }
+        }
+        if (!have_prof_timer)
+#endif
+        {
+            prof_time_val.it_value = profiling_timevalue;
+            setitimer(ITIMER_PROF, &prof_time_val, NULL);
+        }
     }
 
     if (gettimeofday(&eval_begin, NULL))
@@ -892,10 +944,20 @@ mark_end_evaluation (void)
 
 {
     static struct itimerval prof_time_val = { {0,0}, {0,0} };
+#ifdef USE_POSIX_TIMERS
+    static struct itimerspec prof_ptime_val = { {0,0}, {0,0} };
+#endif
 
     // disable the profiling timer
     if (profiling_timevalue.tv_usec || profiling_timevalue.tv_sec)
+    {
+#ifdef USE_POSIX_TIMERS
+        if (have_prof_timer)
+            timer_settime(prof_timer, 0, &prof_ptime_val, NULL);
+        else
+#endif
         setitimer(ITIMER_PROF, &prof_time_val, NULL);
+    }
 
     if (total_evalcost == 0)
         return;

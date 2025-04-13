@@ -53,6 +53,7 @@ with_tls_keyfile=no
 enable_malloc_trace=yes
 enable_malloc_lpc_trace=yes
 enable_use_pthreads=no
+enable_posix_timers=yes
 
 # --- Wizlist ---
 with_wizlist_file=no

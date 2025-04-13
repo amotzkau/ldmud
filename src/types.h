@@ -279,17 +279,29 @@ extern lpctype_t _lpctype_int, _lpctype_string, _lpctype_bytes,
                  _lpctype_any_lwobject, _lpctype_void, _lpctype_unknown;
 
 
-extern lpctype_t *get_struct_name_type(struct_name_t* name);
-extern lpctype_t *get_struct_type(struct_type_t* def);
-extern lpctype_t *get_object_type(string_t* prog);
-extern lpctype_t *get_lwobject_type(string_t* prog);
+#define get_struct_name_type(name)                _get_struct_name_type(name MTRACE_ARG)
+#define get_struct_type(def)                      _get_struct_type(def MTRACE_ARG)
+#define get_object_type(prog)                     _get_object_type(prog MTRACE_ARG)
+#define get_lwobject_type(prog)                   _get_lwobject_type(prog MTRACE_ARG)
 #ifdef USE_PYTHON
-extern lpctype_t *get_python_type(int python_type_id);
+#define get_python_type(python_type_id)           _get_python_type(python_type_id MTRACE_ARG)
 #endif
-extern lpctype_t *get_array_type(lpctype_t *element);
-extern lpctype_t *get_array_type_with_depth(lpctype_t *element, int depth);
-extern lpctype_t *get_union_type(lpctype_t *head, lpctype_t* member);
-extern lpctype_t *get_common_type(lpctype_t *t1, lpctype_t* t2);
+#define get_array_type(element)                   _get_array_type(element MTRACE_ARG)
+#define get_array_type_with_depth(element,depth)  _get_array_type_with_depth(element,depth MTRACE_ARG)
+#define get_union_type(head,member)               _get_union_type(head,member MTRACE_ARG)
+#define get_common_type(t1,t2)                    _get_common_type(t1,t2 MTRACE_ARG)
+
+extern lpctype_t *_get_struct_name_type(struct_name_t* name MTRACE_DECL);
+extern lpctype_t *_get_struct_type(struct_type_t* def MTRACE_DECL);
+extern lpctype_t *_get_object_type(string_t* prog MTRACE_DECL);
+extern lpctype_t *_get_lwobject_type(string_t* prog MTRACE_DECL);
+#ifdef USE_PYTHON
+extern lpctype_t *_get_python_type(int python_type_id MTRACE_DECL);
+#endif
+extern lpctype_t *_get_array_type(lpctype_t *element MTRACE_DECL);
+extern lpctype_t *_get_array_type_with_depth(lpctype_t *element, int depth MTRACE_DECL);
+extern lpctype_t *_get_union_type(lpctype_t *head, lpctype_t* member MTRACE_DECL);
+extern lpctype_t *_get_common_type(lpctype_t *t1, lpctype_t* t2 MTRACE_DECL);
 extern bool has_common_type(lpctype_t *t1, lpctype_t* t2);
 
 extern void make_static_type(lpctype_t *src, lpctype_t *dest);
