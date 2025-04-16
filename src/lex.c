@@ -1808,8 +1808,11 @@ symbol_efun_str (const char * str, size_t len, svalue_t *sp, efun_override_t is_
         ident_t *p;
 
         /* Take care of an leading efun override */
-
-        if ( len >= 6 && !strncmp(str, "efun::", 6) )
+        if (efun_override != OVERRIDE_NONE)
+        {
+            /* Don't allow two overrides. */
+        }
+        else if (len >= 6 && !strncmp(str, "efun::", 6) )
         {
             str += 6;
             len -= 6;
@@ -2120,6 +2123,7 @@ init_global_identifier (ident_t * ident, bool bProgram)
     ident->u.global.std_struct_id = I_GLOBAL_STD_STRUCT_NONE;
 #ifdef USE_PYTHON
     ident->u.global.python_efun = I_GLOBAL_PYTHON_EFUN_OTHER;
+    ident->u.global.python_struct_id = I_GLOBAL_PYTHON_STRUCT_OTHER;
 #endif
 
 } /* init_global_identifier() */

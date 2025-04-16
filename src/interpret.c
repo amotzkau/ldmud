@@ -465,7 +465,7 @@ bytecode_p inter_pc;
   /* Next bytecode to interpret.
    */
 
-static svalue_t *inter_fp;
+svalue_t *inter_fp;
   /* Framepointer: pointer to first argument.
    */
 
@@ -10187,9 +10187,9 @@ again:
         previous_programs[last] = current_prog;
 #   endif  /* ifdef TRACE_CODE */
 
-#   ifdef MALLOC_LPC_TRACE
-        inter_pc = pc;
-#   endif
+#if defined(MALLOC_LPC_TRACE) || defined(USE_PYTHON)
+        inter_pc = pc-1;
+#endif
 
 #   ifdef OPCPROF
         opcount[full_instr]++;
@@ -10208,6 +10208,11 @@ again:
         }
         traceing_recursion--;
     }
+
+#ifdef USE_PYTHON
+    if (current_prog != NULL)
+        python_call_instruction_hook(full_instr);
+#endif
 
     /* Test the evaluation cost.
      * eval_cost < 0 signify a wrap-around - unlikely, but with these crazy
@@ -21844,6 +21849,7 @@ int_call_lambda (svalue_t *lsvp, int num_arg, bool external, svalue_t *bind_ob)
 
                     /* Mark the call as sefun closure */
                     inter_pc = csp->funstart = SIMUL_EFUN_FUNSTART;
+                    csp->instruction = i - CLOSURE_SIMUL_EFUN;
 
                     /* Get the simul_efun object */
                     if ( !(ob = simul_efun_object) )
@@ -22163,7 +22169,7 @@ warn_missing_function_lwob (lwobject_t* lwob, string_t* fun)
 
 /*-------------------------------------------------------------------------*/
 int
-get_line_number (bytecode_p p, program_t *progp, string_t **namep)
+get_line_number (bytecode_p p, program_t *progp, string_t **namep, string_t **fnamep)
 
 /* Look up the line number for address <p> within the program <progp>.
  * Result is the line number, and *<namep> is set to the name of the
@@ -22175,6 +22181,10 @@ get_line_number (bytecode_p p, program_t *progp, string_t **namep)
  *
  * In either case, the string returned in *<namep> has one reference
  * added.
+ *
+ * In fnamep (if != NULL) the original file name (either included file name
+ * or program name) will be returned not ref-counted. If no filename is found,
+ * it will be NULL.
  *
  * TODO: (an old comment which might no longer be true): This can be done
  * TODO:: much more efficiently, but that change has low priority.)
@@ -22203,6 +22213,8 @@ get_line_number (bytecode_p p, program_t *progp, string_t **namep)
     if (!progp || !p)
     {
         *namep = ref_mstring(STR_UNDEFINED);
+        if (fnamep)
+            *fnamep = NULL;
         return 0;
     }
 
@@ -22226,6 +22238,8 @@ get_line_number (bytecode_p p, program_t *progp, string_t **namep)
             if (!rc)
             {
                 *namep = ref_mstring(STR_UNDEFINED);
+                if (fnamep)
+                    *fnamep = NULL;
                 return 0;
             }
         }
@@ -22241,6 +22255,8 @@ get_line_number (bytecode_p p, program_t *progp, string_t **namep)
                       " in object %s\n",
                       time_stamp(), offset, get_txt(progp->name));
         *namep = ref_mstring(STR_UNDEFINED);
+        if (fnamep)
+            *fnamep = NULL;
         return 0;
     }
 
@@ -22392,6 +22408,8 @@ get_line_number (bytecode_p p, program_t *progp, string_t **namep)
             /* No memory for the new string - improvise */
             *namep = ref_mstring(inctop->name);
         }
+        if (fnamep)
+            *fnamep = inctop->name;
 
         /* Free the include stack structures */
         do {
@@ -22407,6 +22425,8 @@ get_line_number (bytecode_p p, program_t *progp, string_t **namep)
         /* Normal code */
 
         *namep = ref_mstring(progp->name);
+        if (fnamep)
+            *fnamep = progp->name;
     }
 
     if (used_system_mem)
@@ -22511,7 +22531,7 @@ get_line_number_if_any (string_t **name)
             free_mstring(location);
             return inter_pc - csp->funstart - 2;
         }
-        return get_line_number(inter_pc, current_prog, name);
+        return get_line_number(inter_pc, current_prog, name, NULL);
     }
   
     *name = ref_mstring(STR_EMPTY);
@@ -22848,7 +22868,7 @@ not_catch:  /* The frame does not point at a catch here */
         /* Nothing of the above: a normal program */
         if (file)
             free_mstring(file);
-        line = get_line_number(dump_pc, prog, &file);
+        line = get_line_number(dump_pc, prog, &file, NULL);
         name = prog->function_headers[FUNCTION_HEADER_INDEX(p[0].funstart)].name;
 
 name_computed: /* Jump target from the catch detection */
@@ -22978,6 +22998,52 @@ dump_trace (Bool how, vector_t ** rvec, string_t ** rstr)
 
     return hb_obj_name;
 } /* dump_trace() */
+
+/*-------------------------------------------------------------------------*/
+local_variable_dbg_t*
+get_first_local_variable (program_t *progp, bytecode_p pc)
+
+/* For the given code position return the debugging information for the first
+ * local variable. Return NULL if there is no local variable or no debugging
+ * information.
+ */
+
+{
+    if (pc < progp->program || pc >= PROGRAM_END(*progp))
+        return NULL;
+
+    if (!progp->num_local_variables)
+        return NULL;
+
+    return get_next_local_variable(progp, pc, progp->local_variables-1);
+} /* get_first_local_variable() */
+
+/*-------------------------------------------------------------------------*/
+local_variable_dbg_t*
+get_next_local_variable (program_t *progp, bytecode_p pc, local_variable_dbg_t *prev)
+
+/* For the given code position return the debugging information for the next
+ * local variable after <prev>. <prev> should be the result of a call to
+ * get_first_local_variable() or get_next_local_variable() with the same
+ * <progp> and <pc>. Return NULL if there is no further local variable.
+ */
+
+{
+    local_variable_dbg_t *end = progp->local_variables + progp->num_local_variables;
+    uint32_t pos = pc - progp->program;
+
+    assert(prev != NULL);
+
+    for (local_variable_dbg_t* cur = prev+1; cur < end; cur++)
+    {
+        if (cur->code_start > pos)
+            return NULL;
+        if (cur->code_end > pos)
+            return cur;
+    }
+
+    return NULL;
+} /* get_next_local_variable() */
 
 /*-------------------------------------------------------------------------*/
 void
@@ -23350,7 +23416,7 @@ last_instructions (int length, Bool verbose, svalue_t **svpp)
                 }
                 else
                 {
-                    line = get_line_number(ppc, ppr, &file);
+                    line = get_line_number(ppc, ppr, &file, NULL);
                 }
 
                 if (!object_svalue_eq(previous_objects[i], old_obj)
@@ -23475,6 +23541,14 @@ int control_stack_depth (void)
 {
     return (csp - CONTROL_STACK) + 1; 
 } /* control_stack_depth() */
+
+/*-------------------------------------------------------------------------*/
+struct control_stack* control_stack_start (void)
+  /* Returns the outermost stack entry.
+   */
+{
+    return CONTROL_STACK;
+} /* control_stack_start() */
 
 /*-------------------------------------------------------------------------*/
 static INLINE int

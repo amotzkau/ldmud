@@ -305,8 +305,9 @@ enum variable_usage
 
 struct local_variable_s
 {
-    fulltype_t          type;   /* The type of the variable.  */
-    enum variable_usage usage;  /* How the variable was used. */
+    fulltype_t          type;   /* The type of the variable.    */
+    enum variable_usage usage;  /* How the variable was used.   */
+    int                 dbg;    /* Index into A_LVARIABLES_DBG. */
 };
 
 /* --- struct global_variable_s: Store info about global variables ---
@@ -405,6 +406,9 @@ enum e_saved_areas {
  , A_VIRTUAL_VAR
     /* (variable_t) The information for all virtual variables.
      */
+ , A_LOCAL_VARIABLES_DBG
+    /* (local_variable_dbg_t) Debugging information for local variables.
+     */
  , A_LINENUMBERS
     /* (char) The linenumber information.
      */
@@ -443,18 +447,19 @@ enum e_saved_areas {
  , NUMPAREAS  /* Number of saved areas */
 };
 
-typedef bytecode_t     A_PROGRAM_t;
-typedef string_t*      A_STRINGS_t;
-typedef variable_t     A_VARIABLES_t;
-typedef variable_t     A_VIRTUAL_VAR_t;
-typedef char           A_LINENUMBERS_t;
-typedef inherit_t      A_INHERITS_t;
-typedef unsigned short A_UPDATE_INDEX_MAP_t;
-typedef lpctype_t*     A_TYPES_t;
-typedef unsigned short A_ARGUMENT_TYPE_INDEX_t;
-typedef unsigned short A_ARGUMENT_INDEX_t;
-typedef include_t      A_INCLUDES_t;
-typedef struct_def_t   A_STRUCT_DEFS_t;
+typedef bytecode_t           A_PROGRAM_t;
+typedef string_t*            A_STRINGS_t;
+typedef variable_t           A_VARIABLES_t;
+typedef variable_t           A_VIRTUAL_VAR_t;
+typedef local_variable_dbg_t A_LOCAL_VARIABLES_DBG_t;
+typedef char                 A_LINENUMBERS_t;
+typedef inherit_t            A_INHERITS_t;
+typedef unsigned short       A_UPDATE_INDEX_MAP_t;
+typedef lpctype_t*           A_TYPES_t;
+typedef unsigned short       A_ARGUMENT_TYPE_INDEX_t;
+typedef unsigned short       A_ARGUMENT_INDEX_t;
+typedef include_t            A_INCLUDES_t;
+typedef struct_def_t         A_STRUCT_DEFS_t;
 
 enum e_internal_areas {
    A_FUNCTIONS = NUMPAREAS
@@ -699,6 +704,16 @@ static mem_block_t mem_block[NUMAREAS];
   /* Return the variable_t* for the variable <n>, virtual or not.
    */
 
+
+#define LOCAL_VARIABLE_DBG_COUNT GET_BLOCK_COUNT(A_LOCAL_VARIABLES_DBG)
+  /* Number of debugging entries for local variables.
+   */
+
+#define LOCAL_VARIABLE_DBG(n)   GET_BLOCK(A_LOCAL_VARIABLES_DBG)[n]
+  /* Return the debugging information at the given index <n>.
+   * <n> corresponds to the .dbg field in A_LOCAL_VARIABLES.
+   */
+
 #define INHERIT(n)              GET_BLOCK(A_INHERITS)[n]
   /* Index the inherit_t <n>.
    */
@@ -938,6 +953,7 @@ struct inline_closure_s
     mp_uint end;
       /* While compiling the closure: end of the program code before
        * the closure. It is not identical to .start because of alignment.
+       * For pending closures: The original .start.
        */
     mp_uint start;
       /* While compiling the closure: start address of the code in A_PROGRAM.
@@ -953,6 +969,12 @@ struct inline_closure_s
        */
     mp_uint li_length;
       /* Length of the linenumber data.
+       */
+    mp_uint lv_start;
+      /* The start index into A_LOCAL_VARIABLES_DBG.
+       */
+    mp_uint lv_length;
+      /* The number of entries in A_LOCAL_VARIABLES_DBG.
        */
     int function;
       /* Function index
@@ -1390,6 +1412,13 @@ lpctype_t *lpctype_unknown_array = &_lpctype_unknown_array,
           *lpctype_catch_msg_arg = &_lpctype_catch_msg_arg,
           *lpctype_mapping_or_closure = &_lpctype_mapping_or_closure;
 
+#ifdef USE_PYTHON
+  /* For any Python defined struct, stores the index+1 into the current
+   * program's struct definitions (STRUCT_DEF / LAMBDA_STRUCT). This is
+   * one-based, so we can easily zero out the table for initialization.
+   */
+unsigned short python_struct_index[PYTHON_STRUCT_TABLE_SIZE];
+#endif
 
 /*-------------------------------------------------------------------------*/
 /* Forward declarations */
@@ -1758,6 +1787,7 @@ DEFINE_ADD_TO_BLOCK_BY_VALUE(ADD_ARGUMENT_INDEX, A_ARGUMENT_INDEX)
 DEFINE_ADD_TO_BLOCK_BY_PTR(ADD_FUNCTION, A_FUNCTIONS)
 DEFINE_ADD_TO_BLOCK_BY_PTR(ADD_VIRTUAL_VAR, A_VIRTUAL_VAR)
 DEFINE_ADD_TO_BLOCK_BY_PTR(ADD_VARIABLE, A_VARIABLES)
+DEFINE_ADD_TO_BLOCK_BY_VALUE(ADD_LOCAL_VARIABLE_DBG, A_LOCAL_VARIABLES_DBG)
 DEFINE_ADD_TO_BLOCK_BY_VALUE(ADD_GLOBAL_VARIABLE_INFO, A_GLOBAL_VARIABLES)
 DEFINE_ADD_TO_BLOCK_BY_PTR(ADD_STRUCT_DEF, A_STRUCT_DEFS)
 DEFINE_ADD_TO_BLOCK_BY_PTR(ADD_STRUCT_MEMBER, A_STRUCT_MEMBERS)
@@ -4513,8 +4543,23 @@ free_all_local_names (void)
 
     while (current_number_of_locals > 0 && local_variables)
     {
+        int dbg;
+
         current_number_of_locals--;
         free_fulltype(local_variables[current_number_of_locals].type);
+
+        dbg = local_variables[current_number_of_locals].dbg;
+        if (dbg >= 0)
+        {
+            if (LOCAL_VARIABLE_DBG(dbg).code_start != CURRENT_PROGRAM_SIZE)
+                LOCAL_VARIABLE_DBG(dbg).code_end = CURRENT_PROGRAM_SIZE;
+            else if (LOCAL_VARIABLE_DBG_COUNT == dbg + 1)
+            {
+                free_mstring(LOCAL_VARIABLE_DBG(dbg).name);
+                free_lpctype(LOCAL_VARIABLE_DBG(dbg).type);
+                mem_block[A_LOCAL_VARIABLES_DBG].current_size -= sizeof(A_LOCAL_VARIABLES_DBG_t);
+            }
+        }
     }
 
     /* Free also types of context variables. */
@@ -4574,12 +4619,18 @@ free_local_names (int depth)
         }
         else
         {
+            int dbg;
+
             current_number_of_locals--;
 
             if (pragma_warn_unused_variables)
                 warn_variable_usage(q->name, local_variables[current_number_of_locals].usage, "Local");
 
             free_fulltype(local_variables[current_number_of_locals].type);
+
+            dbg = local_variables[current_number_of_locals].dbg;
+            if (dbg >= 0)
+                LOCAL_VARIABLE_DBG(dbg).code_end = CURRENT_PROGRAM_SIZE;
         }
         free_shared_identifier(q);
     }
@@ -4645,6 +4696,19 @@ if (current_inline && current_inline->block_depth+2 == block_depth
         /* Record the type */
         local_variables[current_number_of_locals].usage = VAR_USAGE_NONE;
         local_variables[current_number_of_locals].type = type;
+        if (pragma_save_local_names)
+        {
+            local_variables[current_number_of_locals].dbg = LOCAL_VARIABLE_DBG_COUNT;
+            ADD_LOCAL_VARIABLE_DBG((A_LOCAL_VARIABLES_DBG_t){
+                .name = ref_mstring(ident->name),
+                .type = ref_lpctype(type.t_type),
+                .code_start = CURRENT_PROGRAM_SIZE,
+                .code_end = CURRENT_PROGRAM_SIZE,
+                .idx = current_number_of_locals
+            });
+        }
+        else
+            local_variables[current_number_of_locals].dbg = -1;
         current_number_of_locals++;
 
         /* And update the scope information */
@@ -6643,6 +6707,89 @@ define_struct (bool proto, ident_t *p, const char * prog_name, funflag_t flags, 
 
 /*-------------------------------------------------------------------------*/
 static int
+add_struct_type (struct_type_t *stype, lpctype_t *lpctype)
+
+/* Adds an existing struct type to the program and returns its index.
+ * If it already exists, returns its current index.
+ * The reference for <lpctype> is adopted.
+ */
+
+{
+    unsigned short id;
+
+    if (string_context)
+    {
+        struct_t *s;
+
+        for (unsigned short i = 0; i < LAMBDA_STRUCTS_COUNT; i++)
+        {
+            if (LAMBDA_STRUCT(i).type == stype)
+            {
+                free_lpctype(lpctype);
+                return i;
+            }
+        }
+
+        /* Add this as a lambda value. */
+        id = LAMBDA_STRUCTS_COUNT;
+        if (id >= STD_STRUCT_OFFSET)
+        {
+            /* Not enough space to do so. */
+            free_lpctype(lpctype);
+            return -1;
+        }
+
+        s = struct_new(stype);
+        if (!s)
+        {
+            free_lpctype(lpctype);
+            return -1;
+        }
+
+        ADD_LAMBDA_STRUCT((lambda_struct_ident_t){
+            .index = {.kind = LAMBDA_IDENT_VALUE, .value = svalue_struct(s)},
+            .type = ref_struct_type(stype)});
+        /* lpctype is freed by epiolog_closure(). */
+    }
+    else
+    {
+        struct_def_t sdef;
+
+        for (unsigned short i = 0; i < STRUCT_COUNT; i++)
+        {
+            if (STRUCT_DEF(i).type == stype)
+            {
+                free_lpctype(lpctype);
+                return i;
+            }
+        }
+
+        /* Add this as a hidden struct to our program. */
+        id = STRUCT_COUNT;
+        if (id >= STD_STRUCT_OFFSET)
+        {
+            /* Not enough space to do so. */
+            free_lpctype(lpctype);
+            return -1;
+        }
+
+        sdef.type = ref_struct_type(stype);
+        sdef.flags = NAME_HIDDEN;
+        sdef.inh = STRUCT_INH_SEFUN;
+
+        ADD_STRUCT_DEF(&sdef);
+    }
+
+    lpctype->t_struct.def_idx = id;
+    /* Note we keep the reference of lpctype
+     * for epilog() to free it.
+     */
+
+    return id;
+} /* add_struct_type() */
+
+/*-------------------------------------------------------------------------*/
+static int
 find_struct ( ident_t * ident, efun_override_t override )
 
 /* Find the struct <name> and return its index. Return -1 if not found.
@@ -6755,8 +6902,9 @@ find_struct ( ident_t * ident, efun_override_t override )
                 {
                     struct_type_t *stype;
                     lpctype_t *lpctype;
-                    struct_def_t sdef;
+                    int new_id;
                     unsigned short count = SEFUN_STRUCT_DEF_COUNT;
+
                     if (sefun_id >= count)
                     {
                         /* Fill up the A_SEFUN_STRUCT_DEFS block. */
@@ -6778,75 +6926,10 @@ find_struct ( ident_t * ident, efun_override_t override )
                         return id;
                     }
 
-                    if (string_context)
-                    {
-                        struct_t *s;
-
-                        for (unsigned short i = 0; i < LAMBDA_STRUCTS_COUNT; i++)
-                        {
-                            if (LAMBDA_STRUCT(i).type == stype)
-                            {
-                                free_lpctype(lpctype);
-                                SEFUN_STRUCT_DEF(sefun_id) = id;
-                                return id;
-                            }
-                        }
-
-                        /* Add this as a lambda value. */
-                        id = LAMBDA_STRUCTS_COUNT;
-                        if (id >= STD_STRUCT_OFFSET)
-                        {
-                            /* Not enough space to do so. */
-                            free_lpctype(lpctype);
-                            return -1;
-                        }
-
-                        s = struct_new(stype);
-                        if (!s)
-                        {
-                            free_lpctype(lpctype);
-                            return -1;
-                        }
-
-                        ADD_LAMBDA_STRUCT((lambda_struct_ident_t){
-                            .index = {.kind = LAMBDA_IDENT_VALUE, .value = svalue_struct(s)},
-                            .type = ref_struct_type(stype)});
-                        SEFUN_STRUCT_DEF(sefun_id) = id;
-                        /* lpctype is freed by epiolog_closure(). */
-                    }
-                    else
-                    {
-                        for (unsigned short i = 0; i < STRUCT_COUNT; i++)
-                        {
-                            if (STRUCT_DEF(i).type == stype)
-                            {
-                                free_lpctype(lpctype);
-                                SEFUN_STRUCT_DEF(sefun_id) = id;
-                                return id;
-                            }
-                        }
-
-                        /* Add this as a hidden struct to our program. */
-                        id = STRUCT_COUNT;
-                        if (id >= STD_STRUCT_OFFSET)
-                        {
-                            /* Not enough space to do so. */
-                            free_lpctype(lpctype);
-                            return -1;
-                        }
-
-                        sdef.type = ref_struct_type(stype);
-                        sdef.flags = NAME_HIDDEN;
-                        sdef.inh = STRUCT_INH_SEFUN;
-
-                        ADD_STRUCT_DEF(&sdef);
-                        SEFUN_STRUCT_DEF(sefun_id) = id;
-                    }
-
-                    lpctype->t_struct.def_idx = id;
-                    /* Note we keep the reference of lpctype
-                     * for epilog() to free it.
-                     */
+                    new_id = add_struct_type(stype, lpctype);
+                    if (new_id >= 0)
+                        SEFUN_STRUCT_DEF(sefun_id) = new_id;
+                    return new_id;
                 }
 
                 return id;
@@ -6857,6 +6940,38 @@ find_struct ( ident_t * ident, efun_override_t override )
             /* else FALLTHROUGH */
 
         case OVERRIDE_EFUN:
+#ifdef USE_PYTHON
+            if (name->u.global.python_struct_id != I_GLOBAL_PYTHON_STRUCT_OTHER)
+            {
+                unsigned short python_id = name->u.global.python_struct_id;
+                unsigned short id = python_struct_index[python_id];
+                struct_type_t *stype;
+
+                if (id != 0)
+                    return id-1;
+
+                stype = get_python_struct_type(python_id);
+                if (stype != NULL)
+                {
+                    /* Let's see if we already got this struct somehow. */
+                    lpctype_t *lpctype = get_struct_type(stype);
+                    int new_id;
+
+                    id = lpctype->t_struct.def_idx;
+                    if (id != USHRT_MAX
+                     && (string_context ? LAMBDA_STRUCT(id).type : STRUCT_DEF(id).type) == stype)
+                    {
+                        free_lpctype(lpctype);
+                        python_struct_index[python_id] = id+1;
+                        return id;
+                    }
+
+                    new_id = add_struct_type(stype, lpctype);
+                    python_struct_index[python_id] = new_id+1;
+                    return new_id;
+                }
+            }
+#endif
             if (name->u.global.std_struct_id != I_GLOBAL_STD_STRUCT_NONE)
                 return STD_STRUCT_OFFSET + name->u.global.std_struct_id;
             break;
@@ -7639,6 +7754,8 @@ printf("DEBUG: new inline #%"PRIuMPINT": prev %"PRIdMPINT"\n", INLINE_CLOSURE_CO
     ict.length = 0;
     ict.li_start = LINENUMBER_SIZE;
     ict.li_length = 0;
+    ict.lv_start = LOCAL_VARIABLE_DBG_COUNT;
+    ict.lv_length = 0;
     ict.function = -1;
     ict.ident = NULL;
     ict.returntype.t_flags = 0;
@@ -7740,6 +7857,7 @@ printf("DEBUG:   depth %d, locals: %d/%d, break: %d/%d\n",
 printf("DEBUG:   move code to backup %"PRIuMPINT"\n", backup_start);
 #endif /* DEBUG_INLINES */
         add_to_mem_block( A_INLINE_PROGRAM, PROGRAM_BLOCK+start, length);
+        current_inline->end = start;
         current_inline->start = backup_start;
     }
     else
@@ -7862,6 +7980,10 @@ insert_pending_inline_closures (void)
 
 {
     mp_int ix;
+    mp_uint remove_lv_dbg_length = 0;
+    mp_uint remove_lv_dbg_start = 0;
+    inline_closure_t *last_ict = &(INLINE_CLOSURE(INLINE_CLOSURE_COUNT));
+
 #ifdef DEBUG_INLINES
 if (INLINE_CLOSURE_COUNT != 0) printf("DEBUG: insert_inline_closures(): %"
                                       PRIuMPINT" pending\n", 
@@ -7878,7 +8000,9 @@ printf("DEBUG:   #%"PRIdMPINT": start %"PRIuMPINT", length %"PRIuMPINT
 #endif /* DEBUG_INLINES */
         if (ict->length != 0)
         {
-            CURRENT_PROGRAM_SIZE = align(CURRENT_PROGRAM_SIZE);
+            uint32_t code_start = CURRENT_PROGRAM_SIZE = align(CURRENT_PROGRAM_SIZE);
+            mp_uint lv_length;
+            inline_closure_t * next_ict;
 
             store_line_number_info();
             if (stored_lines > ict->start_line)
@@ -7908,7 +8032,57 @@ printf("DEBUG:        li_start %"PRIuMPINT", li_length %"PRIuMPINT
                             , ict->li_length);
             stored_lines = ict->end_line;
             stored_bytes += ict->length;
+
+            /* Update code range for local variable debugging information. */
+            lv_length = 0;
+            next_ict = ict+1;
+            for (int lv_idx = 0; lv_idx < ict->lv_length; lv_idx++)
+            {
+                A_LOCAL_VARIABLES_DBG_t lvar = LOCAL_VARIABLE_DBG(ict->lv_start + lv_idx);
+
+                /* Check that this variables are not part of a subsequent closure. */
+                while (next_ict < last_ict && next_ict->lv_start + next_ict->lv_length <= ict->lv_start + lv_idx)
+                    next_ict++;
+                if (next_ict < last_ict && next_ict->lv_start <= ict->lv_start + lv_idx)
+                    continue;
+
+                /* We need to adjust the original code_start & code_end, because arguments
+                 * are registered before alignment and removed after the F_CLOSURE code
+                 * was created.
+                 */
+                if (lvar.code_start < ict->end)
+                    lvar.code_start = code_start;
+                else
+                    lvar.code_start += code_start - ict->end;
+                if (lvar.code_end > ict->end + ict->length)
+                    lvar.code_end = code_start + ict->length;
+                else
+                    lvar.code_end += code_start - ict->end;
+                ADD_LOCAL_VARIABLE_DBG(lvar);
+                lv_length++;
+            }
+
+            /* Move any inbetween variables to the front. */
+            if (remove_lv_dbg_length == 0)
+                remove_lv_dbg_start = ict->lv_start;
+            else if (remove_lv_dbg_start + remove_lv_dbg_length < ict->lv_start)
+            {
+                memmove(&(LOCAL_VARIABLE_DBG(remove_lv_dbg_start)),
+                        &(LOCAL_VARIABLE_DBG(remove_lv_dbg_start + remove_lv_dbg_length)),
+                        sizeof(A_LOCAL_VARIABLES_DBG_t) * (ict->lv_start - remove_lv_dbg_start - remove_lv_dbg_length));
+                remove_lv_dbg_start = ict->lv_start - remove_lv_dbg_length;
+            }
+
+            remove_lv_dbg_length += lv_length;
         }
+    }
+
+    if (remove_lv_dbg_length > 0)
+    {
+        memmove(&(LOCAL_VARIABLE_DBG(remove_lv_dbg_start)),
+                &(LOCAL_VARIABLE_DBG(remove_lv_dbg_start + remove_lv_dbg_length)),
+                sizeof(A_LOCAL_VARIABLES_DBG_t) * (LOCAL_VARIABLE_DBG_COUNT - remove_lv_dbg_start - remove_lv_dbg_length));
+        mem_block[A_LOCAL_VARIABLES_DBG].current_size -= remove_lv_dbg_length * sizeof(A_LOCAL_VARIABLES_DBG_t);
     }
 
     /* Empty the datastorages */
@@ -8109,6 +8283,7 @@ printf("DEBUG:           current depth: %d: %d\n", block_depth, block_scope[bloc
 
     store_line_number_info();
     current_inline->li_length = LINENUMBER_SIZE - li_start;
+    current_inline->lv_length = LOCAL_VARIABLE_DBG_COUNT - current_inline->lv_start;
     current_inline->end_line = stored_lines;
 
     /* Add the code to push the values of the inherited local
@@ -22073,6 +22248,10 @@ printf("DEBUG: prolog: type ptrs: %p, %p\n", local_variables, context_variables 
     num_lwo_calls = 0;
     uses_non_lightweight_efuns = false;
 
+#ifdef USE_PYTHON
+    memset(python_struct_index, 0, sizeof(python_struct_index));
+#endif
+
     /* Check if call_other() has been replaced by a sefun.
      */
     call_other_sefun = get_simul_efun_index(STR_CALL_OTHER);
@@ -22238,6 +22417,12 @@ epilog_free_all (void)
     for (size_t i = 0; i < LAMBDA_STRUCTS_COUNT; i++)
         if (LAMBDA_STRUCT(i).index.kind == LAMBDA_IDENT_VALUE)
             free_svalue(&(LAMBDA_STRUCT(i).index.value));
+
+    for (size_t i = 0; i < LOCAL_VARIABLE_DBG_COUNT; i++)
+    {
+        free_mstring(LOCAL_VARIABLE_DBG(i).name);
+        free_lpctype(LOCAL_VARIABLE_DBG(i).type);
+    }
 
     compiled_prog = NULL;
 
@@ -22880,6 +23065,17 @@ epilog (void)
                    mem_block[A_VIRTUAL_VAR].current_size);
 
         p += align(mem_block[A_VIRTUAL_VAR].current_size);
+
+        prog->num_local_variables = LOCAL_VARIABLE_DBG_COUNT;
+        if (LOCAL_VARIABLE_DBG_COUNT)
+        {
+            prog->local_variables = (A_LOCAL_VARIABLES_DBG_t *)p;
+            memcpy(p, mem_block[A_LOCAL_VARIABLES_DBG].block,
+                      mem_block[A_LOCAL_VARIABLES_DBG].current_size);
+            p += align(mem_block[A_LOCAL_VARIABLES_DBG].current_size);
+        }
+        else
+            prog->local_variables = NULL;
 
         /* Add the inheritance information, and don't forget
          * to delete our internal flags.

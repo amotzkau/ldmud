@@ -1,5 +1,8 @@
+#pragma save_local_names, rtt_checks
+
 #include "/sys/driver_info.h"
 #include "/inc/base.inc"
+#include "/inc/sefun.inc"
 #include "/inc/deep_eq.inc"
 #include "/inc/testarray.inc"
 #include "/inc/gc.inc"
@@ -40,10 +43,12 @@ void run_test()
             function int()
             {
                 clean_early_ob();
-                /* There should only be one reference:
-                 * The master object startup.ob_list.
+                /* There should only be the following references:
+                 *  - The master object startup.ob_list.
+                 *  - The sefun object startup.ob_list
+                 *  - The struct type startup.PythonStruct
                  */
-                return driver_info(DI_NUM_PYTHON_LPC_REFS) == 1;
+                return driver_info(DI_NUM_PYTHON_LPC_REFS) == 3;
             }
         }),
         ({ "passing int", 0,
@@ -221,6 +226,12 @@ void run_test()
             :)
         }),
         ({
+            "Using Python-defined struct", 0,
+            (:
+                return python_sum_struct((<python_struct> value1: 10, value2: 32)) == 42;
+            :)
+        }),
+        ({
             "using python type 1 (bigint)", 0,
             (:
                 bigint val = to_bigint(1000);
@@ -384,7 +395,7 @@ void run_test()
         ({ "driver_info(DI_NUM_PYTHON_LPC_REFS) after some tests", 0,
             function int()
             {
-                return driver_info(DI_NUM_PYTHON_LPC_REFS) == 1;
+                return driver_info(DI_NUM_PYTHON_LPC_REFS) == 3;
             }
         }),
         ({ "driver_info(DI_NUM_LPC_PYTHON_REFS) with a Python object", 0,
@@ -398,14 +409,22 @@ void run_test()
             function int()
             {
                 box b = create_box(({100}));
-                return driver_info(DI_NUM_PYTHON_LPC_REFS) == 2;
+                return driver_info(DI_NUM_PYTHON_LPC_REFS) == 4;
             }
         }),
         ({
             "Python object hook 1", 0,
             (:
                 object* oblist = python_get_hook_info()[1];
-                return sizeof(oblist) == 1 && oblist[0] == this_object();
+                return sizeof(oblist) == 2 && oblist[0] == this_object() && oblist[1] == find_object("/sefun");
+            :)
+        }),
+        ({
+            "Python BEFORE_INSTRUCTION hook", 0,
+            (:
+                return python_get_last_program_name() == __FILE__ &&
+                       python_get_last_file_name() == __FILE__ &&
+                       python_get_last_line_number() == __LINE__;
             :)
         }),
         ({ "Python GC", 0,
@@ -417,15 +436,35 @@ void run_test()
         }),
         ({ "Python test suite", 0,
             (:
+                string err;
+                int result;
+
                 msg("\n");
-                return python_test();
+                /* For the call_stack test create additional frames. */
+                err = catch(result = funcall(#'funcall, #'python_test));
+                if (err)
+                {
+                    msg("Got error: %s", err);
+                    return 0;
+                }
+                return result;
+            :)
+        }),
+        ({ "Python call frame with destructed objects", 0,
+            (:
+                object ob = clone_object("/testob");
+                return ob.callback(function int()
+                {
+                    destruct(ob);
+                    return python_test_call_stack();
+                });
             :)
         }),
         ({
             "Python object hook 2", 0,
             (:
                 object* oblist = python_get_hook_info()[1];
-                return sizeof(oblist) == 2 && oblist[0] == this_object();
+                return sizeof(oblist) == 3 && oblist[0] == this_object();
             :)
         }),
         ({
@@ -447,7 +486,7 @@ void run_test()
             :)
         })
 
-    }), //#'shutdown);
+    }),
     (:
         if($1)
             shutdown(1);
@@ -540,6 +579,7 @@ void run_test()
 }
 
 int master_fun() { return 54321; }
+int master_var = 98765;
 
 string *epilog(int eflag)
 {

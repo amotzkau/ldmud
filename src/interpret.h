@@ -205,6 +205,7 @@ extern int tracedepth;
 extern int trace_level;
 extern bytecode_p inter_pc;
 extern struct control_stack *csp;
+extern svalue_t * inter_fp;
 extern svalue_t * inter_sp;
 extern svalue_t * inter_context;
 extern int function_index_offset;
@@ -317,10 +318,12 @@ extern void call_ob_function_args(object_t* ob, int fx, int num_arg);
 extern void call_lwob_function_args(lwobject_t* lwob, int fx, int num_arg);
 extern void warn_missing_function_ob(object_t* ob, string_t* fun);
 extern void warn_missing_function_lwob(lwobject_t* ob, string_t* fun);
-extern int get_line_number(bytecode_p p, program_t *progp, string_t **namep);
+extern int get_line_number(bytecode_p p, program_t *progp, string_t **namep, string_t **fnamep);
 extern string_t *collect_trace(strbuf_t * sbuf, vector_t ** rvec);
 extern string_t *dump_trace(Bool how, vector_t **rvec, string_t ** rstr);
 extern int get_line_number_if_any(string_t **name);
+extern local_variable_dbg_t* get_first_local_variable(program_t *progp, bytecode_p pc);
+extern local_variable_dbg_t* get_next_local_variable(program_t *progp, bytecode_p pc, local_variable_dbg_t *prev);
 extern void reset_machine(Bool first);
 extern void secure_apply_error(svalue_t *save_sp, struct control_stack *save_csp, Bool clear_costs);
 extern svalue_t *secure_apply_lwob(string_t *fun, lwobject_t *lwob, int num_arg);
@@ -394,6 +397,7 @@ extern void count_interpreter_refs(void);
 #endif
 
 extern int  control_stack_depth(void);
+extern struct control_stack* control_stack_start(void);
 
 
 #endif /* INTERPRET_H__ */

@@ -726,6 +726,25 @@ struct_publish_type ( struct_type_t * pSType )
 } /* struct_publish_type() */
 
 /*-------------------------------------------------------------------------*/
+void
+struct_publish_global_type ( struct_type_t * pSType )
+
+/* Make the struct type <pSType> the current definition for its name,
+ * replacing an existing entry if necessary.
+ * It is safe to publish the same type multiple times.
+ */
+
+{
+#ifdef DEBUG
+    if (pSType == NULL)
+        fatal("NULL typeobject pointer passed to struct_publish_type().\n");
+#endif
+
+    pSType->prog_id = -1;
+    pSType->name->current = pSType;
+} /* struct_publish_type() */
+
+/*-------------------------------------------------------------------------*/
 Bool
 struct_type_equivalent (struct_type_t * pSType1, struct_type_t *pSType2)
 
@@ -793,8 +812,17 @@ struct_new_name (string_t *name, string_t *prog_name)
  */
 
 {
-    const char* sane_prog_name = make_name_sane(get_txt(prog_name), false, true);
+    const char* sane_prog_name;
     string_t *prog_str;
+
+    if (mstreq(prog_name, STR_GLOBAL)
+#ifdef USE_PYTHON
+     || mstreq(prog_name, STR_PYTHON)
+#endif
+    )
+        sane_prog_name = NULL;
+    else
+        sane_prog_name = make_name_sane(get_txt(prog_name), false, true);
 
     if (sane_prog_name)
     {
@@ -1256,6 +1284,7 @@ create_std_struct_type (int std_struct_idx, lpctype_t *lpctype, const char* name
         init_global_identifier(ident, /* bProgram: */ false);
     ident->u.global.std_struct_id = std_struct_idx;
 
+    struct_publish_global_type(result);
     return result;
 } /* create_std_struct_type() */
 
