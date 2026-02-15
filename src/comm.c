@@ -5133,12 +5133,23 @@ telnet_neg (interactive_t *ip)
         switch (ip->tn_state)
         {
             case TS_READY:
-            case TS_CHAR_READY:
                 /* This shouldn't happen. We can't go into the loop with TS_READY,
                  * and when switching to TS_READY we should exit this function.
                  */
                 DTN(("t_n: somehow in TS_READY - return\n"));
                 return;
+
+            case TS_CHAR_READY:
+                /* We received multiple characters already. Return them. */
+                if (is_charmode(ip))
+                    return;
+
+                /* We are not in charmode anymore. We reprocess the current command
+                 * to handle special characters (newlines, backspaces).
+                 */
+                ip->command_end = ip->command_start;
+                ip->tn_state = TS_DATA;
+                /* FALLTHROUGH */
 
             case TS_DATA:
             {
