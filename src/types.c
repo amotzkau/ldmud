@@ -73,14 +73,14 @@ static size_t num_object_types = 0;
 
 /*-------------------------------------------------------------------------*/
 static lpctype_t *
-lpctype_new (void)
+lpctype_new (void * p UNUSED MTRACE_DECL)
 
 /* Create a new lpctype_t instance.
  * .t_class and class dependant members are left uninitialized.
  */
 
 {
-    lpctype_t *type = (lpctype_t*) xalloc(sizeof(lpctype_t));
+    lpctype_t *type = (lpctype_t*) xalloc_pass(sizeof(lpctype_t));
     type->ref = 1;
     type->t_static = false;
     type->array_of = NULL;
@@ -116,7 +116,7 @@ lpctype_touch (lpctype_t *uniontype)
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_struct_name_type (struct_name_t* name)
+_get_struct_name_type (struct_name_t* name MTRACE_DECL)
 
 /* Create an lpctype_t for struct name <name>.
  */
@@ -128,7 +128,7 @@ get_struct_name_type (struct_name_t* name)
         ref_lpctype(type);
     else
     {
-        name->lpctype = type = lpctype_new();
+        name->lpctype = type = lpctype_new(NULL MTRACE_PASS);
         type->t_class = TCLASS_STRUCT;
         type->t_struct.name = ref_struct_name(name);
         type->t_struct.def_idx = USHRT_MAX;
@@ -140,14 +140,14 @@ get_struct_name_type (struct_name_t* name)
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_struct_type (struct_type_t* def)
+_get_struct_type (struct_type_t* def MTRACE_DECL)
 
 /* Create an lpctype_t around <def>, check for already
  * existing definitions.
  */
 
 {
-    lpctype_t *type = get_struct_name_type(def->name);
+    lpctype_t *type = _get_struct_name_type(def->name MTRACE_PASS);
 
     type->t_struct.def = def;
 
@@ -291,7 +291,7 @@ add_object_type (lpctype_t *type)
 
 /*-------------------------------------------------------------------------*/
 static lpctype_t *
-internal_get_object_type (string_t *prog, object_types_t otype)
+internal_get_object_type (string_t *prog, object_types_t otype MTRACE_DECL)
 
 /* Create an lpctype_t for an (lw)object having <prog> in its program.
  * The name is normalized (removing a leading '/', check for double
@@ -328,7 +328,7 @@ internal_get_object_type (string_t *prog, object_types_t otype)
         return ref_lpctype(result);
     }
 
-    result = lpctype_new();
+    result = lpctype_new(NULL MTRACE_PASS);
     result->t_class = TCLASS_OBJECT;
     result->t_object.program_name = s;
     result->t_object.type = otype;
@@ -348,7 +348,7 @@ internal_get_object_type (string_t *prog, object_types_t otype)
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_object_type (string_t *prog)
+_get_object_type (string_t *prog MTRACE_DECL)
 
 /* Create an lpctype_t for an object having <prog> in its program.
  *
@@ -356,12 +356,12 @@ get_object_type (string_t *prog)
  */
 
 {
-    return internal_get_object_type(prog, OBJECT_REGULAR);
+    return internal_get_object_type(prog, OBJECT_REGULAR MTRACE_PASS);
 } /* get_object_type() */
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_lwobject_type (string_t *prog)
+_get_lwobject_type (string_t *prog MTRACE_DECL)
 
 /* Create an lpctype_t for an lwobject having <prog> in its program.
  *
@@ -369,13 +369,13 @@ get_lwobject_type (string_t *prog)
  */
 
 {
-    return internal_get_object_type(prog, OBJECT_LIGHTWEIGHT);
+    return internal_get_object_type(prog, OBJECT_LIGHTWEIGHT MTRACE_PASS);
 } /* get_lwobject_type() */
 
 /*-------------------------------------------------------------------------*/
 #ifdef USE_PYTHON
 lpctype_t *
-get_python_type (int python_type_id)
+_get_python_type (int python_type_id MTRACE_DECL)
 
 /* Create an lpctype_t for a Python type.
  *
@@ -387,7 +387,7 @@ get_python_type (int python_type_id)
 
     if (type == NULL)
     {
-        type = lpctype_new();
+        type = lpctype_new(NULL MTRACE_PASS);
         type->t_class = TCLASS_PYTHON;
         type->t_python.type_id = python_type_id;
         enter_python_type(python_type_id, type);
@@ -426,7 +426,7 @@ remove_object_type (lpctype_t *type)
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_array_type (lpctype_t *element)
+_get_array_type (lpctype_t *element MTRACE_DECL)
 
 /* Create an array type with <element> as the base type.
  */
@@ -441,7 +441,7 @@ get_array_type (lpctype_t *element)
     if (type != NULL)
         return ref_lpctype(type);
 
-    element->array_of = type = lpctype_new();
+    element->array_of = type = lpctype_new(NULL MTRACE_PASS);
     type->t_class = TCLASS_ARRAY;
     type->t_array.element = ref_lpctype(element);
     if (element->t_class == TCLASS_ARRAY)
@@ -460,7 +460,7 @@ get_array_type (lpctype_t *element)
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_array_type_with_depth (lpctype_t *element, int depth)
+_get_array_type_with_depth (lpctype_t *element, int depth MTRACE_DECL)
 
 /* Create an array whose depth is exactly <depth>.
  */
@@ -483,7 +483,7 @@ get_array_type_with_depth (lpctype_t *element, int depth)
     for (; depth > 0; depth--)
     {
         lpctype_t *old = type;
-        type = get_array_type(type);
+        type = _get_array_type(type MTRACE_PASS);
         free_lpctype(old);
     }
     return type;
@@ -491,7 +491,7 @@ get_array_type_with_depth (lpctype_t *element, int depth)
 
 /*-------------------------------------------------------------------------*/
 static lpctype_t *
-make_union_type (lpctype_t *head, lpctype_t* member)
+make_union_type (lpctype_t *head, lpctype_t* member MTRACE_DECL)
 
 /* Create a union type from <head> and <member>, this function
  * doesn't care about orderung.
@@ -508,7 +508,7 @@ make_union_type (lpctype_t *head, lpctype_t* member)
     if (result)
         return ref_lpctype(result);
 
-    result = lpctype_new();
+    result = lpctype_new(NULL MTRACE_PASS);
     result->t_class = TCLASS_UNION;
     result->t_union.head = ref_lpctype(head);
     result->t_union.member = ref_lpctype(member);
@@ -520,7 +520,7 @@ make_union_type (lpctype_t *head, lpctype_t* member)
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_union_type (lpctype_t *head, lpctype_t* member)
+_get_union_type (lpctype_t *head, lpctype_t* member MTRACE_DECL)
 
 /* Create a union type from <head> (maybe a union type) adding <member>
  * (should not be a union type). <member> is inserted at the correct
@@ -551,7 +551,7 @@ get_union_type (lpctype_t *head, lpctype_t* member)
         do
         {
             insert = result;
-            result = get_union_type(result, next_member->t_union.member);
+            result = _get_union_type(result, next_member->t_union.member MTRACE_PASS);
             free_lpctype(insert);
 
             next_member = next_member->t_union.head;
@@ -559,7 +559,7 @@ get_union_type (lpctype_t *head, lpctype_t* member)
         while (next_member->t_class == TCLASS_UNION);
 
         insert = result;
-        result = get_union_type(result, next_member);
+        result = _get_union_type(result, next_member MTRACE_PASS);
         free_lpctype(insert);
 
         return result;
@@ -591,7 +591,7 @@ get_union_type (lpctype_t *head, lpctype_t* member)
                     if (!lpctype_contains(insert_elem, member))
                     {
                         lpctype_t *prev_result = result;
-                        result = get_union_type(result, insert_elem);
+                        result = _get_union_type(result, insert_elem MTRACE_PASS);
                         free_lpctype(prev_result);
                     }
 
@@ -621,13 +621,13 @@ get_union_type (lpctype_t *head, lpctype_t* member)
 
     if (insert->t_class != TCLASS_UNION && insert > member)
     {
-        result = make_union_type(member, insert);
+        result = make_union_type(member, insert MTRACE_PASS);
         next_member = NULL;
     }
     else
     {
         next_member = insert->unions_of; /* make_union_type will change this. */
-        result = make_union_type(insert, member);
+        result = make_union_type(insert, member MTRACE_PASS);
     }
 
     while (insert != head)
@@ -639,7 +639,7 @@ get_union_type (lpctype_t *head, lpctype_t* member)
         }
         else
             insert = insert->unions_of;
-        result = make_union_type(result, insert->t_union.member);
+        result = make_union_type(result, insert->t_union.member MTRACE_PASS);
         free_lpctype(result->t_union.head);
     }
 
@@ -648,7 +648,7 @@ get_union_type (lpctype_t *head, lpctype_t* member)
 
 /*-------------------------------------------------------------------------*/
 static lpctype_t *
-internal_get_common_type(lpctype_t *t1, lpctype_t* t2, bool find_one)
+internal_get_common_type(lpctype_t *t1, lpctype_t* t2, bool find_one MTRACE_DECL)
 
 /* Determine the intersection of both types.
  * Returns NULL if there is no common type.
@@ -744,8 +744,8 @@ internal_get_common_type(lpctype_t *t1, lpctype_t* t2, bool find_one)
             return NULL;
         else
         {
-            lpctype_t *common_element = get_common_type(t1->t_array.element, t2->t_array.element);
-            lpctype_t *result = get_array_type(common_element);
+            lpctype_t *common_element = _get_common_type(t1->t_array.element, t2->t_array.element MTRACE_PASS);
+            lpctype_t *result = _get_array_type(common_element MTRACE_PASS);
             free_lpctype(common_element);
             return result;
         }
@@ -756,13 +756,13 @@ internal_get_common_type(lpctype_t *t1, lpctype_t* t2, bool find_one)
             while (true)
             {
                 lpctype_t *base = t1->t_class == TCLASS_UNION ? t1->t_union.member : t1;
-                lpctype_t *common_base = get_common_type(t2, base);
+                lpctype_t *common_base = _get_common_type(t2, base MTRACE_PASS);
                 lpctype_t *oldresult = result;
 
                 if (find_one && common_base)
                     return common_base;
 
-                result = get_union_type(result, common_base);
+                result = _get_union_type(result, common_base MTRACE_PASS);
                 free_lpctype(common_base);
                 free_lpctype(oldresult);
 
@@ -789,14 +789,14 @@ has_common_type(lpctype_t *t1, lpctype_t* t2)
  */
 
 {
-    lpctype_t *result = internal_get_common_type(t1, t2, true);
+    lpctype_t *result = internal_get_common_type(t1, t2, true MTRACE_ARG);
     free_lpctype(result);
     return (result != NULL);
 } /* has_common_type() */
 
 /*-------------------------------------------------------------------------*/
 lpctype_t *
-get_common_type(lpctype_t *t1, lpctype_t* t2)
+_get_common_type(lpctype_t *t1, lpctype_t* t2 MTRACE_DECL)
 
 /* Determine the intersection of both types.
  * Returns NULL if there is no common type.
@@ -805,7 +805,7 @@ get_common_type(lpctype_t *t1, lpctype_t* t2)
  */
 
 {
-    return internal_get_common_type(t1, t2, false);
+    return internal_get_common_type(t1, t2, false MTRACE_PASS);
 } /* get_common_type() */
 
 /*-------------------------------------------------------------------------*/

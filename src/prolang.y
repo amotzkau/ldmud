@@ -2416,6 +2416,13 @@ get_common_array_type (lpctype_t* t1, lpctype_t* t2)
 }
 
 static lpctype_t*
+get_common_lpc_type (lpctype_t* t1, lpctype_t* t2)
+
+{
+    return get_common_type(t1, t2);
+}
+
+static lpctype_t*
 get_sub_array_type (lpctype_t* t1, lpctype_t* t2)
 
 /* <t1> and <t2> are arrays. This function returns <t1> if
@@ -2591,7 +2598,7 @@ binary_op_types_t types_binary_and_assignment[] = {
     { &_lpctype_mapping,   &_lpctype_mapping,   &_lpctype_mapping, NULL                  , NULL                   , NULL                   },
     { &_lpctype_mapping,   &_lpctype_any_array, &_lpctype_mapping, NULL                  , NULL                   , NULL                   },
     { &_lpctype_any_array, &_lpctype_mapping,   NULL,              &get_first_type       , NULL                   , NULL                   },
-    { &_lpctype_any_array, &_lpctype_any_array, NULL,              &get_common_type      , NULL                   , NULL                   },
+    { &_lpctype_any_array, &_lpctype_any_array, NULL,              &get_common_lpc_type  , NULL                   , NULL                   },
     { &_lpctype_int,       &_lpctype_int,       &_lpctype_int,     NULL                  , NULL                   , NULL                   },
     { &_lpctype_string,    &_lpctype_string,    &_lpctype_string,  NULL                  , NULL                   , NULL                   },
     { &_lpctype_bytes,     &_lpctype_bytes,     &_lpctype_bytes,   NULL                  , NULL                   , NULL                   },
@@ -2641,7 +2648,7 @@ binary_op_types_t types_binary_and[] = {
     { &_lpctype_mapping,   &_lpctype_mapping,   &_lpctype_mapping, NULL                  , NULL                   , NULL                   },
     { &_lpctype_mapping,   &_lpctype_any_array, &_lpctype_mapping, NULL                  , NULL                   , NULL                   },
     { &_lpctype_any_array, &_lpctype_mapping,   NULL,              &get_first_type       , NULL                   , NULL                   },
-    { &_lpctype_any_array, &_lpctype_any_array, NULL,              &get_common_type      , NULL                   , NULL                   },
+    { &_lpctype_any_array, &_lpctype_any_array, NULL,              &get_common_lpc_type  , NULL                   , NULL                   },
     { &_lpctype_int,       &_lpctype_int,       &_lpctype_int,     NULL                  , NULL                   , NULL                   },
     { &_lpctype_string,    &_lpctype_string,    &_lpctype_string,  NULL                  , NULL                   , NULL                   },
     { &_lpctype_bytes,     &_lpctype_bytes,     &_lpctype_bytes,   NULL                  , NULL                   , NULL                   },
@@ -2653,7 +2660,7 @@ binary_op_types_t types_binary_and[] = {
  * Basically there must be a common type, but ints can be compared with floats also.
  */
 binary_op_types_t types_equality[] = {
-    { &_lpctype_mixed,     &_lpctype_mixed,     &_lpctype_int,     &get_common_type      , NULL                   , NULL                   },
+    { &_lpctype_mixed,     &_lpctype_mixed,     &_lpctype_int,     &get_common_lpc_type  , NULL                   , NULL                   },
     { &_lpctype_int,       &_lpctype_float,     &_lpctype_int,     NULL                  , NULL                   , NULL                   },
     { &_lpctype_float,     &_lpctype_int,       &_lpctype_int,     NULL                  , NULL                   , NULL                   },
     { NULL, NULL, NULL, NULL, NULL, NULL }

@@ -647,6 +647,9 @@ void install_signal_handlers()
     if (sigaction(SIGUSR2, &sa, NULL) == -1)
         perror("Unable to install signal handler for SIGUSR2");
     // Profiling signal handler for the detection of long executions.
+    if (!init_profiling_timer())
+        debug_message("%s Unable to create a POSIX timer for profiling, "
+            "falling back to ITIMER_PROF\n", time_stamp());
     sa.sa_handler = handle_profiling_signal;
     if (sigaction(SIGPROF, &sa, NULL) == -1) {
         profiling_timevalue.tv_sec = 0;
