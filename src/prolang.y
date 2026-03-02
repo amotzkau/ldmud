@@ -22380,6 +22380,8 @@ epilog_free_all (void)
                        , GET_BLOCK(A_STRINGS)
                        , V_VARIABLE_COUNT
                        , GET_BLOCK(A_VIRTUAL_VAR)
+                       , LOCAL_VARIABLE_DBG_COUNT
+                       , GET_BLOCK(A_LOCAL_VARIABLES_DBG)
                        , INCLUDE_COUNT
                        , GET_BLOCK(A_INCLUDES)
                        , STRUCT_COUNT
@@ -22410,12 +22412,6 @@ epilog_free_all (void)
     for (size_t i = 0; i < LAMBDA_STRUCTS_COUNT; i++)
         if (LAMBDA_STRUCT(i).index.kind == LAMBDA_IDENT_VALUE)
             free_svalue(&(LAMBDA_STRUCT(i).index.value));
-
-    for (size_t i = 0; i < LOCAL_VARIABLE_DBG_COUNT; i++)
-    {
-        free_mstring(LOCAL_VARIABLE_DBG(i).name);
-        free_lpctype(LOCAL_VARIABLE_DBG(i).type);
-    }
 
     compiled_prog = NULL;
 
