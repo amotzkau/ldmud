@@ -6159,7 +6159,7 @@ get_function_information (function_t * fun_p, program_t * prog, int ix)
     function_t * header = get_function_header_extended(prog, ix, &inhprogp, &inhfx);
 
     fun_p->name = header->name;
-    fun_p->type = ref_lpctype(header->type);
+    fun_p->type = header->type;
 
     fun_p->num_arg = header->num_arg;
     fun_p->num_opt_arg = header->num_opt_arg;
@@ -20231,7 +20231,7 @@ inherit_functions (program_t *from, uint32 inheritidx)
 
         /* Copy the function information */
         get_function_information(fun_p, from, i2);
-
+        ref_lpctype(fun_p->type);
 
         /* Copy information about the types of the arguments, if it is
          * available.
@@ -23335,14 +23335,16 @@ epilog_closure (int num_args)
     for (int i = 0; i < LAMBDA_STRUCTS_COUNT; i++)
     {
         lpctype_t *t;
+        struct_type_t *st = LAMBDA_STRUCT(i).type;
 
-        if (LAMBDA_STRUCT(i).type == NULL)
+        if (st == NULL)
             continue;
 
-        t = LAMBDA_STRUCT(i).type->name->lpctype;
+        t = st->name->lpctype;
         clean_struct_type(t);
         t->t_struct.def_idx = USHRT_MAX;
         free_lpctype(t);
+        free_struct_type(st);
     }
 
     epilog_free_all();

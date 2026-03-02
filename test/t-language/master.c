@@ -127,6 +127,9 @@ void run_test()
             {
                 msg(" Success.\n");
             }
+
+            if (ob)
+                destruct(ob);
         }
     }
 
