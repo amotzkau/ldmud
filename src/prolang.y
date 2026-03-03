@@ -22303,6 +22303,8 @@ epilog_cleanup (void)
     if (num_parse_error == 0 && type_of_arguments.current_size != 0)
         fatal("Failed to deallocate argument type stack\n");
 #endif
+    while (type_of_arguments.current_size > 0)
+        pop_arg_stack(1);
 
     if (last_string_constant)
     {
