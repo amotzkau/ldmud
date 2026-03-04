@@ -79,8 +79,7 @@ typedef p_uint word_t;
 /*-------------------------------------------------------------------------*/
 
 /* The extra xalloc header fields.
- * GC's write_malloc_trace() expects XM_FILE and XM_LINE at the end 
- * of the header.
+ * GC's write_malloc_trace() expects XM_SRC_LOCATION at the end of the header.
  * TODO: Let the GC use the symbolic constants.
  */
 
@@ -90,22 +89,20 @@ enum xalloc_header_fields {
     XM_PROG = 1,  /* (int32) allocating program's id-number */
     XM_PC   = 2,  /* (bytecode_p) inter_pc at the allocation */
 #    ifdef MALLOC_TRACE
-         XM_FILE = 3,  /* (const char*) allocating source file */
-         XM_LINE = 4,  /* (word_t) allocating line in source file */
-         XM_OVERHEAD = 5 + VALGRIND_REDZONE,
+         XM_SRC_LOCATION = 3,  /* (const char*) allocating source file and line */
+         XM_OVERHEAD     = 4 + VALGRIND_REDZONE,
 #    else
-         XM_OVERHEAD = 3 + VALGRIND_REDZONE,
+         XM_OVERHEAD     = 3 + VALGRIND_REDZONE,
 #    endif /* MALLOC_TRACE */
 #else /* !MALLOC_LPC_TRACE */
 #    ifdef MALLOC_TRACE
-         XM_FILE = 0,  /* (const char*) allocating source file */
-         XM_LINE = 1,  /* (word_t) allocating line in source file */
-         XM_OVERHEAD = 2 + VALGRIND_REDZONE,
+         XM_SRC_LOCATION = 0,  /* (const char*) allocating source file and line */
+         XM_OVERHEAD     = 1 + VALGRIND_REDZONE,
 #    else
-         XM_OVERHEAD = 0 + VALGRIND_REDZONE,
+         XM_OVERHEAD     = 0 + VALGRIND_REDZONE,
 #    endif /* MALLOC_TRACE */
 #endif /* MALLOC_LPC_TRACE */
-    XM_OVERHEAD_SIZE = XM_OVERHEAD * sizeof(word_t),
+    XM_OVERHEAD_SIZE     = XM_OVERHEAD * sizeof(word_t),
 
     /* Flags set at the XM_OBJ entry. */
     XM_OBJ_MASK             = 0x01,     /* All flags together.     */
@@ -164,8 +161,7 @@ static int going_to_exit = MY_FALSE;
 static size_t mdb_size;
 static svalue_t mdb_object;
 #    if defined(MALLOC_TRACE)
-        static const char * mdb_file;
-        static int mdb_line;
+        static const char * mdb_location;
 #    endif
   /* Persistent copy of the latest memory request information,
    * so that the SBRK_TRACE can print it.
@@ -213,8 +209,8 @@ mem_debug_log (const char * name, p_int size)
                 , (p_int)current_time_stamp, (p_int)name
                 , (p_int)size, (p_int)mdb_size
                 );
-      dprintf3(1, " , '%s':%d , obj %s\n"
-                , (p_int)mdb_file, (p_int)mdb_line
+      dprintf3(1, " , %s, obj %s\n"
+                , (p_int)mdb_location,
                 , (p_int)(mdb_object.type == T_OBJECT   ? ( mdb_object.u.ob->name ? get_txt(mdb_object.u.ob->name) : "<?>")
                         : mdb_object.type == T_LWOBJECT ? mdb_object.u.lwob->prog->name)
                         : "<null>")
@@ -495,10 +491,6 @@ retry_alloc (size_t size MTRACE_DECL)
         ", prog ";
     static char mess_d6[] =
         ")";
-#if defined(MALLOC_TRACE)
-    static char mess_d5[] =
-        " line ";
-#endif
     static char mess_nl[] =
         "\n";
 
@@ -510,9 +502,7 @@ retry_alloc (size_t size MTRACE_DECL)
     writes(2, mess_d3);
 #ifdef MALLOC_TRACE
     writes(2, mess_d4);
-    writes(2, malloc_trace_file);
-    writes(2, mess_d5);
-    writed(2, malloc_trace_line);
+    writes(2, malloc_trace_location);
     writes(2, mess_d6);
 #endif
     writes(2, mess_d4);
@@ -621,8 +611,7 @@ xalloc_traced (size_t size MTRACE_DECL)
     mdb_size = size;
     mdb_object = current_object;
 #ifdef MALLOC_TRACE
-        mdb_file = malloc_trace_file;
-        mdb_line = malloc_trace_line;
+    mdb_location = malloc_trace_location;
 #endif
 #endif /* MALLOC_SBRK_TRACE */
 
@@ -639,8 +628,7 @@ xalloc_traced (size_t size MTRACE_DECL)
 
     VALGRIND_MAKE_MEM_UNDEFINED((char*)p, XM_OVERHEAD_SIZE);
 #ifdef MALLOC_TRACE
-        p[XM_FILE] = (word_t)malloc_trace_file;
-        p[XM_LINE] = (word_t)malloc_trace_line;
+    p[XM_SRC_LOCATION] = (word_t)malloc_trace_location;
 #endif
 #ifdef MALLOC_LPC_TRACE
         switch (current_object.type)
@@ -783,8 +771,7 @@ rexalloc_traced (void * p, size_t size MTRACE_DECL
 #ifndef MALLOC_SBRK_TRACE
 #ifdef MALLOC_TRACE
 #   ifdef __MWERKS__
-#       pragma unused(malloc_trace_file)
-#       pragma unused(malloc_trace_line)
+#       pragma unused(malloc_trace_location)
 #   endif
 #endif /* MALLOC_TRACE */
 #endif /* MALLOC_SBRK_TRACE */
@@ -806,8 +793,7 @@ rexalloc_traced (void * p, size_t size MTRACE_DECL
     mdb_size = size;
     mdb_object = current_object;
 #ifdef MALLOC_TRACE
-        mdb_file = malloc_trace_file;
-        mdb_line = malloc_trace_line;
+    mdb_location = malloc_trace_location;
 #endif
 #endif /* MALLOC_SBRK_TRACE */
 
@@ -931,8 +917,7 @@ static int num_dispatched_types = 0;
    */
 
 static struct {
-    char *file;
-    word_t line;
+    char *location;
     void (*func)(int, void *, int);
 } dispatch_table[12];
   /* The dispatch table used to recognize and print datablocks.
@@ -948,25 +933,21 @@ static struct {
  * and object allocations.
  */
 
-static char * object_file;
-static word_t object_line;
-static char * program_file;
-static word_t program_line;
+static char * object_location;
+static char * program_location;
 
 void
 note_object_allocation_info ( void *block )
 {
     VALGRIND_MAKE_MEM_DEFINED((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
-    object_file = (char *)((word_t*)block)[XM_FILE-XM_OVERHEAD];
-    object_line = ((word_t*)block)[XM_LINE-XM_OVERHEAD];
+    object_location = (char *)((word_t*)block)[XM_SRC_LOCATION-XM_OVERHEAD];
     VALGRIND_MAKE_MEM_NOACCESS((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
 }
 void
 note_program_allocation_info ( void *block )
 {
     VALGRIND_MAKE_MEM_DEFINED((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
-    program_file = (char *)((word_t*)block)[XM_FILE-XM_OVERHEAD];
-    program_line = ((word_t*)block)[XM_LINE-XM_OVERHEAD];
+    program_location = (char *)((word_t*)block)[XM_SRC_LOCATION-XM_OVERHEAD];
     VALGRIND_MAKE_MEM_NOACCESS((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
 }
 
@@ -974,8 +955,7 @@ Bool
 is_object_allocation ( void *block )
 {
     VALGRIND_MAKE_MEM_DEFINED((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
-    Bool result = (object_file == (char *)((word_t*)block)[XM_FILE-XM_OVERHEAD])
-               && (object_line == ((word_t*)block)[XM_LINE-XM_OVERHEAD]);
+    Bool result = (object_location == (char *)((word_t*)block)[XM_SRC_LOCATION-XM_OVERHEAD]);
     VALGRIND_MAKE_MEM_NOACCESS((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
     return result;
 }
@@ -983,8 +963,7 @@ Bool
 is_program_allocation ( void *block )
 {
     VALGRIND_MAKE_MEM_DEFINED((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
-    Bool result = (program_file == (char *)((word_t*)block)[XM_FILE-XM_OVERHEAD])
-               && (program_line == ((word_t*)block)[XM_LINE-XM_OVERHEAD]);
+    Bool result = (program_location == (char *)((word_t*)block)[XM_SRC_LOCATION-XM_OVERHEAD]);
     VALGRIND_MAKE_MEM_NOACCESS((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
     return result;
 }
@@ -1011,8 +990,7 @@ store_print_block_dispatch_info (void *block
     }
 
     VALGRIND_MAKE_MEM_DEFINED((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
-    dispatch_table[i].file = (char *)((word_t*)block)[XM_FILE-XM_OVERHEAD];
-    dispatch_table[i].line = ((word_t*)block)[XM_LINE-XM_OVERHEAD];
+    dispatch_table[i].location = (char *)((word_t*)block)[XM_SRC_LOCATION-XM_OVERHEAD];
     dispatch_table[i].func = func;
     VALGRIND_MAKE_MEM_NOACCESS((char*)block - XM_OVERHEAD_SIZE, XM_OVERHEAD_SIZE);
 } /* store_print_block_dispatch_info() */
@@ -1050,13 +1028,11 @@ print_block (int d, word_t *block)
     int i;
 
 #ifdef MALLOC_TRACE
-    char *file = (char *)block[XM_FILE];
-    word_t line = block[XM_LINE];
+    char *location = (char *)block[XM_SRC_LOCATION];
 
     for (i = num_dispatched_types; --i >= 0; )
     {
-        if (dispatch_table[i].file == file
-         && dispatch_table[i].line == line)
+        if (dispatch_table[i].location == location)
         {
             (*dispatch_table[i].func)(d, (char *)(block+XM_OVERHEAD), 0);
             write(d, "\n", 1);
@@ -1284,8 +1260,8 @@ dump_malloc_trace (int d
 #    ifdef MALLOC_TRACE
         word_t size = mem_block_size(p);
 
-        dprintf3(d, " %s %d size 0x%x\n",
-                  p[XM_FILE], p[XM_LINE], size
+        dprintf2(d, " %s size 0x%x\n",
+                  p[XM_SRC_LOCATION], size
                 );
 #    endif
 #    ifdef MALLOC_LPC_TRACE

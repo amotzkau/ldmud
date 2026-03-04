@@ -79,9 +79,14 @@
 
 #ifdef MALLOC_TRACE
 
-#define MTRACE_DECL     , const char * malloc_trace_file, int malloc_trace_line
-#define MTRACE_PASS     , malloc_trace_file, malloc_trace_line
-#define MTRACE_ARG      , __FILE__, __LINE__
+#define LINE_STR_HELPER(line)           #line
+#define LINE_STR(line)                  LINE_STR_HELPER(line)
+#define MAKE_SRC_LOCATION(file,line)    file ":" LINE_STR(line)
+#define CURRENT_SRC_LOCATION            MAKE_SRC_LOCATION(__FILE__, __LINE__)
+
+#define MTRACE_DECL     , const char * malloc_trace_location
+#define MTRACE_PASS     , malloc_trace_location
+#define MTRACE_ARG      , CURRENT_SRC_LOCATION
 
 #else
 
@@ -139,7 +144,7 @@
 
 /* If USE_PCRE is defined, check if the libpcre is available on this system.
  * Disable USE_PCRE if not. */
-#if defined(USE_PCRE) && !defined(HAS_PCRE)
+#if defined(USE_PCRE) && !defined(HAS_PCRE) && !defined(HAS_PCRE2)
 #undef USE_PCRE
 #endif
 

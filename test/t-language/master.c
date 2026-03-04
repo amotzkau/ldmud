@@ -71,6 +71,10 @@ void run_test()
     {
         object ob;
         string err;
+        string code = read_file(file);
+
+        if ("// Not for compile_string()" in code)
+            continue;
 
         msg("Running String Compiler Test %s...", file[0..<3]);
 
@@ -89,11 +93,10 @@ void run_test()
         else
         {
             int res;
-            string code = read_file(file);
             string* fun = explode(code, "int run_test()");
-            if (sizeof(fun) != 2 || "// Not for compile_string()" in code)
+            if (sizeof(fun) != 2)
             {
-                msg(" Skipped.\n");
+                msg(" Skipped (function not found).\n");
                 continue;
             }
 
@@ -124,6 +127,9 @@ void run_test()
             {
                 msg(" Success.\n");
             }
+
+            if (ob)
+                destruct(ob);
         }
     }
 
