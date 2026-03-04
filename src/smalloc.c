@@ -3457,8 +3457,7 @@ esbrk (word_t size, size_t * pExtra)
     p = (word_t *)(block + size) - overhead + 1;
 
 #ifdef MALLOC_TRACE
-    p[M_OVERHEAD+XM_FILE] = (word_t)"sentinel/bridge";
-    p[M_OVERHEAD+XM_LINE] = 0;
+    p[M_OVERHEAD+XM_SRC_LOCATION] = (word_t)"sentinel/bridge";
 #endif
 #ifdef MALLOC_LPC_TRACE
     p[M_OVERHEAD+XM_OBJ] = 0;
@@ -3566,8 +3565,7 @@ esbrk (word_t size, size_t * pExtra)
                 prev[M_SIZE] = (prev[M_SIZE] & (PREV_BLOCK|THIS_BLOCK|M_GC_FREE)) | M_MASK;
                 prev[M_LSIZE] = (word_t*)block - prev + 1;
 #ifdef MALLOC_TRACE
-                prev[M_OVERHEAD+XM_FILE] = (word_t)"block";
-                prev[M_OVERHEAD+XM_LINE] = 0;
+                prev[M_OVERHEAD+XM_SRC_LOCATION] = (word_t)"block";
 #endif
 #ifdef MALLOC_LPC_TRACE
                 prev[M_OVERHEAD+XM_OBJ] = 0;
@@ -3935,8 +3933,8 @@ mem_free_unrefed_memory (void)
             dprintf1(gcollect_outfd, "freeing large block 0x%x", (p_uint)p);
 #endif
 #ifdef MALLOC_TRACE
-            dprintf3(gcollect_outfd, " %s %d size 0x%x\n",
-              p[XM_FILE+ML_OVERHEAD], p[XM_LINE+ML_OVERHEAD], size & M_MASK
+            dprintf2(gcollect_outfd, " %s size 0x%x\n",
+              p[XM_SRC_LOCATION+ML_OVERHEAD], size & M_MASK
             );
 #endif
 #ifdef MALLOC_LPC_TRACE
@@ -3982,8 +3980,7 @@ mem_free_unrefed_memory (void)
                 dprintf2(gcollect_outfd, "freeing small block 0x%x (user 0x%x)"
                         , (p_uint)q, (p_uint)(q+M_OVERHEAD));
 #ifdef MALLOC_TRACE
-                dprintf2(gcollect_outfd, " %s %d"
-                        , q[XM_FILE+M_OVERHEAD], q[XM_LINE+M_OVERHEAD]);
+                dprintf1(gcollect_outfd, " %s", q[XM_SRC_LOCATION+M_OVERHEAD]);
 #endif
                 writes(gcollect_outfd, "\n");
 #ifdef MALLOC_LPC_TRACE
@@ -4051,10 +4048,8 @@ mem_dump_memory (int fd)
             else
             {
 #ifdef MALLOC_TRACE
-                if (p[XM_FILE+ML_OVERHEAD])
-                    dprintf2(fd, ": %s %d "
-                               , p[XM_FILE+ML_OVERHEAD], p[XM_LINE+ML_OVERHEAD]
-                    );
+                if (p[XM_SRC_LOCATION+ML_OVERHEAD])
+                    dprintf1(fd, ": %s ", p[XM_SRC_LOCATION+ML_OVERHEAD]);
                 else
                     writes(fd, ": - -");
 #endif
@@ -4113,10 +4108,8 @@ mem_dump_memory (int fd)
                 if ((size & M_MASK) > M_OVERHEAD)
                 {
 #ifdef MALLOC_TRACE
-                    if (q[XM_FILE+M_OVERHEAD])
-                        dprintf2(fd, ": %s %d "
-                                   , q[XM_FILE+M_OVERHEAD], q[XM_LINE+M_OVERHEAD]
-                        );
+                    if (q[XM_SRC_LOCATION+M_OVERHEAD])
+                        dprintf1(fd, ": %s ", q[XM_SRC_LOCATION+M_OVERHEAD]);
                     else
                         writes(fd, ": - - ");
 #endif
