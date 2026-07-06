@@ -119,21 +119,10 @@ extern int stack_direction;
  * Ditto for rexalloc().
  */
 
-#if defined(MALLOC_TRACE)
-
-#define xalloc(size)         xalloc_traced((size), __FILE__, __LINE__)
-#define pxalloc(size)        pxalloc_traced((size), __FILE__, __LINE__)
-#define rexalloc(old, size)  rexalloc_traced((old), (size), __FILE__, __LINE__)
-#define prexalloc(old, size) prexalloc_traced((old), (size), __FILE__, __LINE__)
-
-#else
-
-#define xalloc(size)         xalloc_traced(size)
-#define pxalloc(size)        pxalloc_traced(size)
-#define rexalloc(old, size)  rexalloc_traced((old), (size))
-#define prexalloc(old, size) prexalloc_traced((old), (size))
-
-#endif
+#define xalloc(size)         xalloc_traced((size) MTRACE_ARG)
+#define pxalloc(size)        pxalloc_traced((size) MTRACE_ARG)
+#define rexalloc(old, size)  rexalloc_traced((old), (size) MTRACE_ARG)
+#define prexalloc(old, size) prexalloc_traced((old), (size) MTRACE_ARG)
 
 #define xalloc_pass(size)       xalloc_traced((size) MTRACE_PASS)
 #define rexalloc_pass(old,size) rexalloc_traced((old),(size) MTRACE_PASS)
@@ -196,7 +185,7 @@ extern void mem_free_unrefed_memory(void);
 /* --- Associated functions --- */
 
 #if defined(MALLOC_TRACE)
-#define string_copy(s) string_copy_traced(s, __FILE__ "::string_copy", __LINE__)
+#define string_copy(s) string_copy_traced(s, MAKE_SRC_LOCATION(__FILE__ "::string_copy", __LINE__))
 #else
 #define string_copy(s) string_copy_traced(s)
 #endif

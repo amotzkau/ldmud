@@ -1241,8 +1241,9 @@ static bc_offset_t current_break_address;
    *
    * There are a few special values/flags for this variable:
    */
-#define BREAK_ADDRESS_MASK   0x0003ffff
-  /* Mask for the offset-address part of the variable.
+#define BREAK_ADDRESS_MASK     0x000fffff
+  /* Mask for the offset-address part of the variable. It should allow
+   * for a normal program size (FUNSTART_MASK).
    */
 #define BREAK_ON_STACK        (0x04000000)
   /* Bitflag: true when the break-address is stored on the break stack,
@@ -1273,14 +1274,15 @@ static bc_offset_t current_continue_address;
    * also encodes the switch()-nesting depth in the top bits of the
    * variable.
    */
-#define CONTINUE_ADDRESS_MASK   0x0003ffff
-  /* Mask for the offset-address part of the variable.
+#define CONTINUE_ADDRESS_MASK   0x000fffff
+  /* Mask for the offset-address part of the variable. It should allow
+   * for a normal program size (FUNSTART_MASK).
    */
-#define SWITCH_DEPTH_UNIT       0x00040000
+#define SWITCH_DEPTH_UNIT       0x00100000
   /* The switch depth is encoded in multiples of this value.
    * This way we don't have to shift.
    */
-#define SWITCH_DEPTH_MASK       0x3ffc0000
+#define SWITCH_DEPTH_MASK       0x3ff00000
   /* Mask for the switch-nesting depth part of the variable.
    */
 #define CONTINUE_DELIMITER     -0x40000000
@@ -6166,7 +6168,7 @@ get_function_information (function_t * fun_p, program_t * prog, int ix)
     function_t * header = get_function_header_extended(prog, ix, &inhprogp, &inhfx);
 
     fun_p->name = header->name;
-    fun_p->type = ref_lpctype(header->type);
+    fun_p->type = header->type;
 
     fun_p->num_arg = header->num_arg;
     fun_p->num_opt_arg = header->num_opt_arg;
@@ -11611,7 +11613,11 @@ statement:
 
           /* In either case, handle the list of continues alike */
           ins_jump_offset(current_continue_address & CONTINUE_ADDRESS_MASK);
-          current_continue_address =
+
+          // We cannot represent offsets larger than CONTINUE_ADDRESS_MASK.
+          // However in this case compilation will fail anyways due to program size.
+          if (CURRENT_PROGRAM_SIZE <= CONTINUE_ADDRESS_MASK)
+              current_continue_address =
                         ( current_continue_address & SWITCH_DEPTH_MASK ) |
                         ( CURRENT_PROGRAM_SIZE - sizeof(int32) );
 
@@ -20238,7 +20244,7 @@ inherit_functions (program_t *from, uint32 inheritidx)
 
         /* Copy the function information */
         get_function_information(fun_p, from, i2);
-
+        ref_lpctype(fun_p->type);
 
         /* Copy information about the types of the arguments, if it is
          * available.
@@ -22310,6 +22316,8 @@ epilog_cleanup (void)
     if (num_parse_error == 0 && type_of_arguments.current_size != 0)
         fatal("Failed to deallocate argument type stack\n");
 #endif
+    while (type_of_arguments.current_size > 0)
+        pop_arg_stack(1);
 
     if (last_string_constant)
     {
@@ -22387,6 +22395,8 @@ epilog_free_all (void)
                        , GET_BLOCK(A_STRINGS)
                        , V_VARIABLE_COUNT
                        , GET_BLOCK(A_VIRTUAL_VAR)
+                       , LOCAL_VARIABLE_DBG_COUNT
+                       , GET_BLOCK(A_LOCAL_VARIABLES_DBG)
                        , INCLUDE_COUNT
                        , GET_BLOCK(A_INCLUDES)
                        , STRUCT_COUNT
@@ -22417,12 +22427,6 @@ epilog_free_all (void)
     for (size_t i = 0; i < LAMBDA_STRUCTS_COUNT; i++)
         if (LAMBDA_STRUCT(i).index.kind == LAMBDA_IDENT_VALUE)
             free_svalue(&(LAMBDA_STRUCT(i).index.value));
-
-    for (size_t i = 0; i < LOCAL_VARIABLE_DBG_COUNT; i++)
-    {
-        free_mstring(LOCAL_VARIABLE_DBG(i).name);
-        free_lpctype(LOCAL_VARIABLE_DBG(i).type);
-    }
 
     compiled_prog = NULL;
 
@@ -23346,14 +23350,16 @@ epilog_closure (int num_args)
     for (int i = 0; i < LAMBDA_STRUCTS_COUNT; i++)
     {
         lpctype_t *t;
+        struct_type_t *st = LAMBDA_STRUCT(i).type;
 
-        if (LAMBDA_STRUCT(i).type == NULL)
+        if (st == NULL)
             continue;
 
-        t = LAMBDA_STRUCT(i).type->name->lpctype;
+        t = st->name->lpctype;
         clean_struct_type(t);
         t->t_struct.def_idx = USHRT_MAX;
         free_lpctype(t);
+        free_struct_type(st);
     }
 
     epilog_free_all();

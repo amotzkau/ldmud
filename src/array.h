@@ -54,10 +54,10 @@ extern void (*allocate_array_error_handler) (const char *, ...);
 
 #if defined(MALLOC_TRACE)
 
-#define allocate_array(n) (_allocate_array(n, __FILE__ "::allocate_array", __LINE__))
-#define allocate_array_unlimited(n) (_allocate_array_unlimited(n, __FILE__ "::allocate_array", __LINE__))
-#define allocate_uninit_array(n) (_allocate_array(n, __FILE__ "::allocate_uninit_array", __LINE__))
-#define implode_string(a,d) (arr_implode_string(a,d, __FILE__ "::implode_string", __LINE__))
+#define allocate_array(n) (_allocate_array(n, MAKE_SRC_LOCATION(__FILE__ "::allocate_array", __LINE__)))
+#define allocate_array_unlimited(n) (_allocate_array_unlimited(n, MAKE_SRC_LOCATION(__FILE__ "::allocate_array", __LINE__)))
+#define allocate_uninit_array(n) (_allocate_array(n, MAKE_SRC_LOCATION(__FILE__ "::allocate_uninit_array", __LINE__)))
+#define implode_string(a,d) (arr_implode_string(a,d, MAKE_SRC_LOCATION(__FILE__ "::implode_string", __LINE__)))
 
 #else
 

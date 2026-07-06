@@ -267,6 +267,12 @@ static bool python_is_external = true;
   * true otherwise (upon external events)
   */
 
+static bool skip_closure_init = false;
+ /* Set by ldmud_closure_new() when creating an already initialized
+  * closure object to prevent the corresponding init() function to
+  * initialize again.
+  */
+
 ident_t *all_python_idents = NULL;
 
 int num_python_efun = 0;
@@ -9393,6 +9399,7 @@ ldmud_closure_new (PyTypeObject *type, PyObject *args, PyObject *kwds)
     }
 
     result = ldmud_closure_create(&cl);
+    skip_closure_init = true;
     free_svalue(&cl);
     return result;
 } /* ldmud_closure_init() */
@@ -9689,6 +9696,12 @@ ldmud_lfun_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *kwds)
     string_t *funname;
     int idx;
 
+    if (skip_closure_init)
+    {
+        skip_closure_init = false;
+        return 0;
+    }
+
     bound_ob = NULL;
     if (! PyArg_ParseTupleAndKeywords(args, kwds, "Os#|O", kwlist,
                                       &lfun_ob,
@@ -9935,6 +9948,12 @@ ldmud_identifier_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *
     string_t *varname;
     int idx;
 
+    if (skip_closure_init)
+    {
+        skip_closure_init = false;
+        return 0;
+    }
+
     if (! PyArg_ParseTupleAndKeywords(args, kwds, "Os#", kwlist,
                                       &var_ob,
                                       &name, &length))
@@ -10129,6 +10148,12 @@ ldmud_lambda_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *kwds
  */
 
 {
+    if (skip_closure_init)
+    {
+        skip_closure_init = false;
+        return 0;
+    }
+
     PyErr_SetString(PyExc_NameError, "__init__ not supported for this type");
     return -1;
 } /* ldmud_lambda_closure_init() */
@@ -10290,6 +10315,12 @@ ldmud_bound_lambda_closure_init (ldmud_closure_t *self, PyObject *args, PyObject
     ldmud_closure_t *lambda;
     bound_lambda_t *l;
     svalue_t sv_ob;
+
+    if (skip_closure_init)
+    {
+        skip_closure_init = false;
+        return 0;
+    }
 
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO!", kwlist,
                                      &ob, &ldmud_unbound_lambda_closure_type, &lambda))
@@ -10467,6 +10498,12 @@ ldmud_efun_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *kwds)
     svalue_t sv_ob;
     int idx;
 
+    if (skip_closure_init)
+    {
+        skip_closure_init = false;
+        return 0;
+    }
+
     if (! PyArg_ParseTupleAndKeywords(args, kwds, "OO", kwlist,
                                       &ob, &name))
         return -1;
@@ -10501,7 +10538,7 @@ ldmud_efun_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *kwds)
 
         if (!idx)
         {
-            PyErr_Format(PyExc_NameError, "unknown efun '%s'", get_txt(efun_name));
+            PyErr_Format(PyExc_NameError, "unknown efun '%U'", name);
             return -1;
         }
     }
@@ -10684,6 +10721,12 @@ ldmud_simul_efun_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *
     string_t *sefun_name;
     int idx;
 
+    if (skip_closure_init)
+    {
+        skip_closure_init = false;
+        return 0;
+    }
+
     if (! PyArg_ParseTupleAndKeywords(args, kwds, "Os#", kwlist, &ob, &name, &length))
         return -1;
 
@@ -10711,7 +10754,7 @@ ldmud_simul_efun_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *
 
     if (!idx)
     {
-        PyErr_Format(PyExc_NameError, "unknown simul-efun '%s'", get_txt(sefun_name));
+        PyErr_Format(PyExc_NameError, "unknown simul-efun '%U'", name);
         return -1;
     }
 
@@ -10867,6 +10910,12 @@ ldmud_operator_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *kw
     Py_ssize_t length;
     svalue_t sv_ob, cl;
     int idx;
+
+    if (skip_closure_init)
+    {
+        skip_closure_init = false;
+        return 0;
+    }
 
     if (! PyArg_ParseTupleAndKeywords(args, kwds, "Os#", kwlist, &ob, &name, &length))
         return -1;

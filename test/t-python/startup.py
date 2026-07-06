@@ -628,8 +628,9 @@ class TestClosure(unittest.TestCase):
     def testEfun(self):
         s = ldmud.Closure(self.master, "this_object")
         self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.EfunClosure)
         self.assertEqual(s(), self.master)
-        s2 = ldmud.Closure(self.master, "this_object")
+        s2 = ldmud.EfunClosure(self.master, "this_object")
         self.assertEqual(s2, s)
         self.assertIn(s2, set((s,)))
         with self.assertRaises(ValueError):
@@ -637,10 +638,22 @@ class TestClosure(unittest.TestCase):
         s_ne = ldmud.Closure(self.master, "this_player")
         self.assertEqual({s: 42, s_ne: 52}[s2], 42)
 
+    def testPrefixedEfun(self):
+        s = ldmud.Closure(self.master, "efun::this_object")
+        self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.EfunClosure)
+        self.assertEqual(s(), self.master)
+        s2 = ldmud.EfunClosure(self.master, "this_object")
+        self.assertEqual(s2, s)
+        self.assertIn(s2, set((s,)))
+        with self.assertRaises(ValueError):
+            s(ldmud.Array([1]), ldmud)
+
     def testLWOEfun(self):
         lwob = ldmud.LWObject("/testob")
         s = ldmud.Closure(lwob, "this_object")
         self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.EfunClosure)
         self.assertEqual(s(), lwob)
         s2 = ldmud.Closure(lwob, "this_object")
         self.assertEqual(s2, s)
@@ -648,9 +661,28 @@ class TestClosure(unittest.TestCase):
         s_ne = ldmud.Closure(lwob, "this_player")
         self.assertEqual({s: 42, s_ne: 52}[s2], 42)
 
+    def testSimulEfun(self):
+        s = ldmud.Closure(self.master, "testsefun")
+        self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.SimulEfunClosure)
+        self.assertEqual(list(s(10)), ["10", "/master.c"])
+        s2 = ldmud.SimulEfunClosure(self.master, "testsefun")
+        self.assertEqual(s2, s)
+        self.assertIn(s2, set((s,)))
+
+    def testPrefixedSimulEfun(self):
+        s = ldmud.Closure(self.master, "sefun::testsefun")
+        self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.SimulEfunClosure)
+        self.assertEqual(list(s(20)), ["20", "/master.c"])
+        s2 = ldmud.SimulEfunClosure(self.master, "testsefun")
+        self.assertEqual(s2, s)
+        self.assertIn(s2, set((s,)))
+
     def testOperator(self):
         s = ldmud.Closure(self.master, ",")
         self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.OperatorClosure)
         with self.assertRaises(RuntimeError):
             s()
         s2 = ldmud.Closure(self.master, ",")
@@ -662,6 +694,7 @@ class TestClosure(unittest.TestCase):
     def testLfun(self):
         s = ldmud.Closure(self.master, "master_fun", self.master)
         self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.LfunClosure)
         self.assertEqual(s(), 54321)
         s2 = ldmud.Closure(self.master, "master_fun", self.master)
         self.assertEqual(s2, s)
@@ -682,6 +715,7 @@ class TestClosure(unittest.TestCase):
         lwob = ldmud.LWObject("/testob")
         s = ldmud.Closure(lwob, "testfun", lwob)
         self.assertIsNotNone(s)
+        self.assertIsInstance(s, ldmud.LfunClosure)
         self.assertEqual(s(42, "A", "B", "C"), 3)
         s2 = ldmud.Closure(lwob, "testfun", lwob)
         self.assertEqual(s2, s)
@@ -698,6 +732,14 @@ class TestClosure(unittest.TestCase):
             swap(ob)
             self.assertEqual(c(10, "A", "B", "C"), 3)
             ldmud.efuns.destruct(ob)
+
+    def testInvalidEfun(self):
+        with self.assertRaises(NameError):
+            ldmud.EfunClosure(self.master, "doesntexist")
+
+    def testInvalidSimulEfun(self):
+        with self.assertRaises(NameError):
+            ldmud.SimulEfunClosure(self.master, "doesntexist")
 
 class TestLfunClosure(unittest.TestCase):
     def setUp(self):

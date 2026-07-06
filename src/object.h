@@ -175,6 +175,7 @@ extern void remove_all_objects(void);
 #endif
 extern void do_free_sub_strings(int num_strings, string_t ** strings
                                , int num_variables, variable_t *variables
+                               , int num_local_variables, local_variable_dbg_t *local_variables
                                , int num_includes, include_t *includes
                                ,int num_structs,  struct_def_t *struct_defs
                                );

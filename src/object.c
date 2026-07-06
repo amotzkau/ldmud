@@ -549,13 +549,15 @@ reference_prog (program_t *progp, char *from)
 void
 do_free_sub_strings (int num_strings,   string_t **strings
                     ,int num_variables, variable_t *variables
+                    ,int num_local_variables, local_variable_dbg_t *local_variables
                     ,int num_includes,  include_t *includes
                     ,int num_structs,  struct_def_t *struct_defs
                     )
 
 /* Free a bunch of shared strings used in connection with an object:
  * the <num_strings> strings in the array <strings>,
- * the <num_variables> names and type objects of the vars in array <variables>, 
+ * the <num_variables> names and type objects of the vars in array <variables>,
+ * the <num_local_variables> names and type objects of the vars in array <local_variables>,
  * the <num_includes> names of the includes in array <includes>,
  * the <num_structs> names of the struct defs in array <struct_defs>, and.
  *
@@ -569,11 +571,18 @@ do_free_sub_strings (int num_strings,   string_t **strings
     for (i = 0; i < num_strings; i++)
         free_mstring(strings[i]);
 
-    /* Free all variable names and types */
+    /* Free all global variable names and types */
     for (i = num_variables; --i >= 0; )
     {
         free_mstring(variables[i].name);
         free_fulltype(variables[i].type);
+    }
+
+    /* Free all local variable names and types */
+    for (i = num_local_variables; --i >= 0; )
+    {
+        free_mstring(local_variables[i].name);
+        free_lpctype(local_variables[i].type);
     }
 
     /* Free all include names */
@@ -694,6 +703,7 @@ _free_prog (program_t *progp, Bool free_all, const char * file, int line
         /* Free the strings, variable names and include filenames. */
         do_free_sub_strings( progp->num_strings, progp->strings
                            , progp->num_variables, progp->variables
+                           , progp->num_local_variables, progp->local_variables
                            , progp->num_includes, progp->includes
                            , progp->num_structs, progp->struct_defs
                            );
